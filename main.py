@@ -7,7 +7,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=["http://localhost:5173","https://spacegame-front-end.onrender.com"],
     allow_methods=["GET"],
     allow_headers=["*"],
 )
