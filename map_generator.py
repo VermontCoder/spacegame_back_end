@@ -244,7 +244,7 @@ def _compute_layout(
         weight="weight",
         iterations=150,
         seed=rng.randint(0, 2**31),
-        k=1.5 / math.sqrt(G.number_of_nodes()),
+        k=0.9 / math.sqrt(G.number_of_nodes()),
     )
 
     # Scale to 0-1000 x 0-800 with padding

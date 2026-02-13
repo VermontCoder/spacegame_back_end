@@ -94,8 +94,8 @@ def test_all_systems_have_positions():
 def test_safe_path_to_founders_world():
     """Every player must be able to reach Founder's World without passing
     through another player's home cluster."""
-    for num_players in [2, 4, 6, 8]:
-        for seed in [1, 42, 99, 777]:
+    for num_players in [2, 3, 4, 5, 6, 7, 8]:
+        for seed in [1, 7, 42, 99, 777]:
             result = generate_map(num_players, seed=seed)
             G = nx.Graph()
             for s in result["systems"]:
