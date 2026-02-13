@@ -91,6 +91,44 @@ def test_all_systems_have_positions():
         assert isinstance(s["y"], float)
 
 
+def test_safe_path_to_founders_world():
+    """Every player must be able to reach Founder's World without passing
+    through another player's home cluster."""
+    for num_players in [2, 4, 6, 8]:
+        for seed in [1, 42, 99, 777]:
+            result = generate_map(num_players, seed=seed)
+            G = nx.Graph()
+            for s in result["systems"]:
+                G.add_node(s["id"])
+            for jl in result["jump_lines"]:
+                G.add_edge(jl["from_id"], jl["to_id"])
+
+            # Build cluster ownership lookup: system_id -> player_index or None
+            system_owner = {}
+            for cluster in result["clusters"]:
+                for sid in cluster["system_ids"]:
+                    if cluster["is_home_cluster"]:
+                        system_owner[sid] = cluster["player_index"]
+                    else:
+                        system_owner[sid] = None
+            system_owner[0] = None  # Founder's World is neutral
+
+            homes = [s for s in result["systems"] if s["is_home_system"]]
+            for home in homes:
+                player = home["owner_player_index"]
+                # Safe nodes: own cluster + neutral + Founder's World
+                safe_nodes = {
+                    sid for sid, owner in system_owner.items()
+                    if owner is None or owner == player
+                }
+                safe_subgraph = G.subgraph(safe_nodes)
+                assert nx.has_path(safe_subgraph, home["id"], 0), (
+                    f"Player {player} (home={home['id']}) cannot reach Founder's World "
+                    f"without passing through another player's cluster "
+                    f"(players={num_players}, seed={seed})"
+                )
+
+
 def test_deterministic_with_seed():
     """Same seed should produce identical maps."""
     result1 = generate_map(4, seed=123)

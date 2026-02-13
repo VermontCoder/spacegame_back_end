@@ -150,6 +150,62 @@ def _build_graph(clusters: list[dict], rng: random.Random) -> nx.Graph:
     return G
 
 
+def _ensure_safe_paths(
+    G: nx.Graph, clusters: list[dict], rng: random.Random
+) -> None:
+    """Ensure every player can reach Founder's World (node 0) without
+    passing through another player's home cluster. Adds jump lines as needed."""
+    # Build system -> owner lookup (None = neutral/FW)
+    system_owner: dict[int, int | None] = {0: None}
+    for cluster in clusters:
+        owner = cluster["player_index"] if cluster["is_home_cluster"] else None
+        for sid in cluster["system_ids"]:
+            system_owner[sid] = owner
+
+    # Identify home system for each player (first system in their cluster)
+    player_home: dict[int, int] = {}
+    for cluster in clusters:
+        if cluster["is_home_cluster"] and cluster["system_ids"]:
+            player_home[cluster["player_index"]] = cluster["system_ids"][0]
+
+    for player_idx, home_id in player_home.items():
+        # Safe nodes: own cluster + neutral clusters + Founder's World
+        safe_nodes = {
+            sid for sid, owner in system_owner.items()
+            if owner is None or owner == player_idx
+        }
+        safe_sub = G.subgraph(safe_nodes)
+
+        if nx.has_path(safe_sub, home_id, 0):
+            continue  # Already has a safe path
+
+        # Find which safe nodes are reachable from the player's home
+        player_reachable = nx.node_connected_component(safe_sub, home_id)
+        # Find which safe nodes are reachable from Founder's World
+        fw_reachable = nx.node_connected_component(safe_sub, 0)
+
+        # Add a jump line bridging player's reachable safe nodes to FW's reachable safe nodes
+        candidates = [
+            (a, b)
+            for a in player_reachable
+            for b in fw_reachable
+            if G.degree(a) < 4 and G.degree(b) < 4 and not G.has_edge(a, b)
+        ]
+        if candidates:
+            a, b = min(candidates, key=lambda pair: (G.degree(pair[0]) + G.degree(pair[1])))
+            G.add_edge(a, b, weight=0.5)
+        else:
+            # Fallback: allow exceeding degree constraint to guarantee safe path
+            for a in player_reachable:
+                for b in fw_reachable:
+                    if not G.has_edge(a, b):
+                        G.add_edge(a, b, weight=0.5)
+                        break
+                else:
+                    continue
+                break
+
+
 def _compute_layout(
     G: nx.Graph, clusters: list[dict], rng: random.Random
 ) -> dict[int, tuple[float, float]]:
@@ -240,6 +296,7 @@ def generate_map(num_players: int, seed: int = None) -> dict:
     _distribute_systems(num_systems, clusters, rng)
 
     G = _build_graph(clusters, rng)
+    _ensure_safe_paths(G, clusters, rng)
     positions = _compute_layout(G, clusters, rng)
     names = _assign_names(num_systems, rng)
 
