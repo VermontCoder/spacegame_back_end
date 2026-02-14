@@ -1,3 +1,4 @@
+import os
 import random
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -9,7 +10,7 @@ from sqlalchemy.orm import Session
 from auth import create_access_token, get_current_user, hash_password, verify_password
 from database import Base, create_game_database, engine, get_db, get_game_session
 from map_generator import generate_map
-from models import Game, JumpLine, StarSystem, User
+from models import Game, GamePlayer, JumpLine, StarSystem, User
 
 app = FastAPI()
 
@@ -143,44 +144,13 @@ class GenerateMapRequest(BaseModel):
     seed: int | None = None
 
 
-@app.post("/games")
-def create_game(req: CreateGameRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    game = Game(name=req.name, num_players=req.num_players, creator_id=current_user.user_id)
-    db.add(game)
-    db.commit()
-    db.refresh(game)
-
-    # Create per-game database
-    db_name = create_game_database(game.game_id)
-    game.db_name = db_name
-    db.commit()
-
-    return {"game_id": game.game_id, "name": game.name, "num_players": game.num_players, "creator_id": game.creator_id}
-
-
-@app.post("/games/{game_id}/generate-map")
-def generate_game_map(game_id: int, req: GenerateMapRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    game = db.query(Game).filter(Game.game_id == game_id).first()
-    if not game:
-        raise HTTPException(status_code=404, detail="Game not found")
-
-    # Get a session to the game's database
+def _save_map_to_game_db(game_id: int, map_data: dict):
+    """Save generated map data (systems + jump lines) to a game's database."""
     game_db = get_game_session(game_id)
     try:
-        # Clear any existing map data
         game_db.query(JumpLine).delete()
         game_db.query(StarSystem).delete()
 
-        # Generate map
-        seed = req.seed if req.seed is not None else random.randint(0, 2**31)
-        map_data = generate_map(game.num_players, seed=seed)
-
-        # Store seed on game record (in admin DB)
-        game.seed = seed
-        game.status = "map_generated"
-        db.commit()
-
-        # Save systems (map generator IDs to DB IDs)
         gen_id_to_db_id = {}
         for sys_data in map_data["systems"]:
             system = StarSystem(
@@ -195,10 +165,9 @@ def generate_game_map(game_id: int, req: GenerateMapRequest, db: Session = Depen
                 owner_player_index=sys_data["owner_player_index"],
             )
             game_db.add(system)
-            game_db.flush()  # Get the DB-assigned ID
+            game_db.flush()
             gen_id_to_db_id[sys_data["id"]] = system.system_id
 
-        # Save jump lines
         for jl_data in map_data["jump_lines"]:
             jump = JumpLine(
                 from_system_id=gen_id_to_db_id[jl_data["from_id"]],
@@ -209,6 +178,177 @@ def generate_game_map(game_id: int, req: GenerateMapRequest, db: Session = Depen
         game_db.commit()
     finally:
         game_db.close()
+
+
+def _generate_and_save_map(game: Game, db: Session):
+    """Generate map with random seed, save to game DB, set status to active."""
+    seed = random.randint(0, 2**31)
+    map_data = generate_map(game.num_players, seed=seed)
+    _save_map_to_game_db(game.game_id, map_data)
+    game.seed = seed
+    game.status = "active"
+    db.commit()
+
+
+@app.post("/games")
+def create_game(req: CreateGameRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    if req.num_players < 2 or req.num_players > 8:
+        raise HTTPException(status_code=400, detail="num_players must be between 2 and 8")
+
+    game = Game(name=req.name, num_players=req.num_players, status="open", creator_id=current_user.user_id)
+    db.add(game)
+    db.commit()
+    db.refresh(game)
+
+    # Create per-game database
+    db_name = create_game_database(game.game_id)
+    game.db_name = db_name
+    db.commit()
+
+    # Auto-join creator as player 1
+    player = GamePlayer(game_id=game.game_id, user_id=current_user.user_id, player_index=1)
+    db.add(player)
+    db.commit()
+
+    return {
+        "game_id": game.game_id,
+        "name": game.name,
+        "num_players": game.num_players,
+        "status": game.status,
+        "player_count": 1,
+        "creator_id": game.creator_id,
+    }
+
+
+@app.get("/games")
+def list_games(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    games = db.query(Game).all()
+    result = []
+    for g in games:
+        player_count = db.query(GamePlayer).filter(GamePlayer.game_id == g.game_id).count()
+        is_member = db.query(GamePlayer).filter(
+            GamePlayer.game_id == g.game_id, GamePlayer.user_id == current_user.user_id
+        ).first() is not None
+        creator_username = g.creator.username if g.creator else None
+        result.append({
+            "game_id": g.game_id,
+            "name": g.name,
+            "num_players": g.num_players,
+            "player_count": player_count,
+            "status": g.status,
+            "creator_username": creator_username,
+            "created_at": g.created_at.isoformat() if g.created_at else None,
+            "is_member": is_member,
+        })
+    return result
+
+
+@app.get("/games/{game_id}/players")
+def get_game_players(game_id: int, db: Session = Depends(get_db)):
+    game = db.query(Game).filter(Game.game_id == game_id).first()
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    players = (
+        db.query(GamePlayer, User)
+        .join(User, GamePlayer.user_id == User.user_id)
+        .filter(GamePlayer.game_id == game_id)
+        .order_by(GamePlayer.player_index)
+        .all()
+    )
+    return [
+        {"player_index": gp.player_index, "username": u.username}
+        for gp, u in players
+    ]
+
+
+@app.post("/games/{game_id}/join")
+def join_game(game_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    game = db.query(Game).filter(Game.game_id == game_id).first()
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    if game.status != "open":
+        raise HTTPException(status_code=400, detail="Game is not open for joining")
+
+    existing = db.query(GamePlayer).filter(
+        GamePlayer.game_id == game_id, GamePlayer.user_id == current_user.user_id
+    ).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Already joined this game")
+
+    player_count = db.query(GamePlayer).filter(GamePlayer.game_id == game_id).count()
+    if player_count >= game.num_players:
+        raise HTTPException(status_code=400, detail="Game is full")
+
+    next_index = player_count + 1
+    player = GamePlayer(game_id=game_id, user_id=current_user.user_id, player_index=next_index)
+    db.add(player)
+    db.commit()
+
+    # Check if game is now full — auto-generate map
+    new_count = db.query(GamePlayer).filter(GamePlayer.game_id == game_id).count()
+    if new_count >= game.num_players:
+        _generate_and_save_map(game, db)
+
+    return {"game_id": game_id, "player_index": next_index, "status": game.status}
+
+
+def _is_dev_mode() -> bool:
+    """Check if we're running in dev mode based on the database URL."""
+    base_url = os.environ.get("postgresDB", "")
+    return "localhost" in base_url or "127.0.0.1" in base_url
+
+
+@app.post("/games/express-start")
+def express_start(req: CreateGameRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    if not _is_dev_mode():
+        raise HTTPException(status_code=403, detail="Express start is only available in dev mode")
+    if req.num_players < 2 or req.num_players > 8:
+        raise HTTPException(status_code=400, detail="num_players must be between 2 and 8")
+
+    # Create game
+    game = Game(name=req.name, num_players=req.num_players, status="open", creator_id=current_user.user_id)
+    db.add(game)
+    db.commit()
+    db.refresh(game)
+
+    db_name = create_game_database(game.game_id)
+    game.db_name = db_name
+    db.commit()
+
+    # Add creator as player 1
+    db.add(GamePlayer(game_id=game.game_id, user_id=current_user.user_id, player_index=1))
+    db.commit()
+
+    # Fill remaining slots with test_user accounts
+    test_users = db.query(User).filter(User.username.like("test_user%")).order_by(User.user_id).all()
+    needed = req.num_players - 1
+    if len(test_users) < needed:
+        raise HTTPException(status_code=400, detail=f"Need {needed} test_user accounts but only found {len(test_users)}")
+
+    for i, tu in enumerate(test_users[:needed]):
+        db.add(GamePlayer(game_id=game.game_id, user_id=tu.user_id, player_index=i + 2))
+    db.commit()
+
+    # Generate map and set active
+    _generate_and_save_map(game, db)
+
+    return {"game_id": game.game_id, "name": game.name, "status": game.status, "num_players": game.num_players}
+
+
+@app.post("/games/{game_id}/generate-map")
+def generate_game_map(game_id: int, req: GenerateMapRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    game = db.query(Game).filter(Game.game_id == game_id).first()
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+
+    seed = req.seed if req.seed is not None else random.randint(0, 2**31)
+    map_data = generate_map(game.num_players, seed=seed)
+
+    game.seed = seed
+    game.status = "map_generated"
+    db.commit()
+
+    _save_map_to_game_db(game_id, map_data)
 
     return {"status": "generated", "seed": seed, "num_systems": len(map_data["systems"])}
 

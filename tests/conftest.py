@@ -94,3 +94,17 @@ def auth_headers(client):
     })
     token = response.json()["access_token"]
     return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.fixture
+def auth_headers_2(client):
+    """Register a second test user via the API and return auth headers."""
+    response = client.post("/auth/register", json={
+        "username": "testuser2",
+        "first_name": "Test2",
+        "last_name": "User2",
+        "email": "test2@example.com",
+        "password": "testpass2",
+    })
+    token = response.json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}

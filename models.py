@@ -25,13 +25,27 @@ class Game(Base):
     game_id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String(100), nullable=False)
     num_players = Column(Integer, nullable=False)
-    status = Column(String(20), nullable=False, default="setup")
+    status = Column(String(20), nullable=False, default="open")
     seed = Column(Integer, nullable=True)
     db_name = Column(String(100), nullable=True)
     creator_id = Column(Integer, ForeignKey("users.user_id"), nullable=True)
     created_at = Column(DateTime, server_default=func.now())
 
     creator = relationship("User", backref="games")
+    players = relationship("GamePlayer", back_populates="game")
+
+
+class GamePlayer(Base):
+    __tablename__ = "game_players"
+
+    game_player_id = Column(Integer, primary_key=True, autoincrement=True)
+    game_id = Column(Integer, ForeignKey("games.game_id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.user_id"), nullable=False)
+    player_index = Column(Integer, nullable=False)
+    joined_at = Column(DateTime, server_default=func.now())
+
+    game = relationship("Game", back_populates="players")
+    user = relationship("User", backref="game_memberships")
 
 
 # --- Per-game tables (spacegame_game_{id} databases) ---
