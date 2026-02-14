@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from auth import create_access_token, get_current_user, hash_password, verify_password
 from database import Base, create_game_database, engine, get_db, get_game_session
 from map_generator import generate_map
 from models import Game, JumpLine, StarSystem, User
@@ -21,6 +22,86 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+
+# --- Auth models ---
+
+class RegisterRequest(BaseModel):
+    username: str
+    first_name: str
+    last_name: str
+    email: str
+    password: str
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+# --- Auth endpoints ---
+
+@app.post("/auth/register")
+def register(req: RegisterRequest, db: Session = Depends(get_db)):
+    if db.query(User).filter(User.username == req.username).first():
+        raise HTTPException(status_code=400, detail="Username already taken")
+    if db.query(User).filter(User.email == req.email).first():
+        raise HTTPException(status_code=400, detail="Email already registered")
+
+    user = User(
+        username=req.username,
+        first_name=req.first_name,
+        last_name=req.last_name,
+        email=req.email,
+        password=hash_password(req.password),
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    token = create_access_token({"sub": str(user.user_id)})
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user": {
+            "user_id": user.user_id,
+            "username": user.username,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "email": user.email,
+        },
+    }
+
+
+@app.post("/auth/login")
+def login(req: LoginRequest, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.username == req.username).first()
+    if not user or not verify_password(req.password, user.password):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    token = create_access_token({"sub": str(user.user_id)})
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user": {
+            "user_id": user.user_id,
+            "username": user.username,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "email": user.email,
+        },
+    }
+
+
+@app.get("/auth/me")
+def get_me(current_user: User = Depends(get_current_user)):
+    return {
+        "user_id": current_user.user_id,
+        "username": current_user.username,
+        "first_name": current_user.first_name,
+        "last_name": current_user.last_name,
+        "email": current_user.email,
+    }
 
 
 # --- Existing endpoints ---
@@ -63,8 +144,8 @@ class GenerateMapRequest(BaseModel):
 
 
 @app.post("/games")
-def create_game(req: CreateGameRequest, db: Session = Depends(get_db)):
-    game = Game(name=req.name, num_players=req.num_players)
+def create_game(req: CreateGameRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    game = Game(name=req.name, num_players=req.num_players, creator_id=current_user.user_id)
     db.add(game)
     db.commit()
     db.refresh(game)
@@ -74,11 +155,11 @@ def create_game(req: CreateGameRequest, db: Session = Depends(get_db)):
     game.db_name = db_name
     db.commit()
 
-    return {"game_id": game.game_id, "name": game.name, "num_players": game.num_players}
+    return {"game_id": game.game_id, "name": game.name, "num_players": game.num_players, "creator_id": game.creator_id}
 
 
 @app.post("/games/{game_id}/generate-map")
-def generate_game_map(game_id: int, req: GenerateMapRequest, db: Session = Depends(get_db)):
+def generate_game_map(game_id: int, req: GenerateMapRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     game = db.query(Game).filter(Game.game_id == game_id).first()
     if not game:
         raise HTTPException(status_code=404, detail="Game not found")
@@ -107,6 +188,7 @@ def generate_game_map(game_id: int, req: GenerateMapRequest, db: Session = Depen
                 x=sys_data["x"],
                 y=sys_data["y"],
                 mining_value=sys_data["mining_value"],
+                materials=sys_data["materials"],
                 cluster_id=sys_data["cluster_id"],
                 is_home_system=sys_data["is_home_system"],
                 is_founders_world=sys_data["is_founders_world"],
@@ -158,6 +240,7 @@ def get_game_map(game_id: int, db: Session = Depends(get_db)):
                     "x": s.x,
                     "y": s.y,
                     "mining_value": s.mining_value,
+                    "materials": s.materials,
                     "cluster_id": s.cluster_id,
                     "is_home_system": s.is_home_system,
                     "is_founders_world": s.is_founders_world,

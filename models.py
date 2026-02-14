@@ -12,10 +12,10 @@ class User(Base):
     __tablename__ = "users"
 
     user_id = Column(Integer, primary_key=True, autoincrement=True)
-    username = Column(String(50), nullable=False)
+    username = Column(String(50), nullable=False, unique=True)
     first_name = Column(String(50), nullable=False)
     last_name = Column(String(50), nullable=False)
-    email = Column(String(100), nullable=False)
+    email = Column(String(100), nullable=False, unique=True)
     password = Column(String(255), nullable=False)
 
 
@@ -28,7 +28,10 @@ class Game(Base):
     status = Column(String(20), nullable=False, default="setup")
     seed = Column(Integer, nullable=True)
     db_name = Column(String(100), nullable=True)
+    creator_id = Column(Integer, ForeignKey("users.user_id"), nullable=True)
     created_at = Column(DateTime, server_default=func.now())
+
+    creator = relationship("User", backref="games")
 
 
 # --- Per-game tables (spacegame_game_{id} databases) ---
@@ -41,6 +44,7 @@ class StarSystem(GameBase):
     x = Column(Float, nullable=False)
     y = Column(Float, nullable=False)
     mining_value = Column(Integer, nullable=False, default=0)
+    materials = Column(Integer, nullable=False, default=0)
     cluster_id = Column(Integer, nullable=False)
     is_home_system = Column(Boolean, nullable=False, default=False)
     is_founders_world = Column(Boolean, nullable=False, default=False)

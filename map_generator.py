@@ -344,6 +344,7 @@ def generate_map(num_players: int, seed: int = None) -> dict:
             "x": x,
             "y": y,
             "mining_value": mining_values[node_id],
+            "materials": 0,
             "cluster_id": cluster_id,
             "is_home_system": is_home,
             "is_founders_world": is_founders,

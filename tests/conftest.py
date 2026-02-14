@@ -57,10 +57,14 @@ def game_db_session():
 
 
 @pytest.fixture
-def client(db_session, monkeypatch):
+def client(monkeypatch):
     """Provide a FastAPI test client with mocked DB dependencies."""
     def override_get_db():
-        yield db_session
+        session = AdminSession()
+        try:
+            yield session
+        finally:
+            session.close()
 
     main.app.dependency_overrides[get_db] = override_get_db
 
@@ -76,3 +80,17 @@ def client(db_session, monkeypatch):
 
     yield TestClient(main.app)
     main.app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def auth_headers(client):
+    """Register a test user via the API and return auth headers."""
+    response = client.post("/auth/register", json={
+        "username": "testuser",
+        "first_name": "Test",
+        "last_name": "User",
+        "email": "test@example.com",
+        "password": "testpass",
+    })
+    token = response.json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}

@@ -5,3 +5,5 @@ networkx
 numpy
 pytest
 httpx
+bcrypt
+python-jose[cryptography]
