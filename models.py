@@ -1,5 +1,5 @@
 from sqlalchemy import (
-    Boolean, Column, DateTime, Float, ForeignKey, Integer, String, func
+    Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text, func
 )
 from sqlalchemy.orm import relationship
 
@@ -30,6 +30,8 @@ class Game(Base):
     db_name = Column(String(100), nullable=True)
     creator_id = Column(Integer, ForeignKey("users.user_id"), nullable=True)
     created_at = Column(DateTime, server_default=func.now())
+    current_turn = Column(Integer, nullable=True)
+    winner_player_index = Column(Integer, nullable=True)
 
     creator = relationship("User", backref="games")
     players = relationship("GamePlayer", back_populates="game")
@@ -74,3 +76,33 @@ class JumpLine(GameBase):
 
     from_system = relationship("StarSystem", foreign_keys=[from_system_id])
     to_system = relationship("StarSystem", foreign_keys=[to_system_id])
+
+
+class Ship(GameBase):
+    __tablename__ = "ships"
+
+    ship_id = Column(Integer, primary_key=True, autoincrement=True)
+    system_id = Column(Integer, ForeignKey("star_systems.system_id"), nullable=False)
+    player_index = Column(Integer, nullable=False)  # -1 = neutral (Founder's World)
+    count = Column(Integer, nullable=False, default=0)
+
+    system = relationship("StarSystem", backref="ships")
+
+
+class Structure(GameBase):
+    __tablename__ = "structures"
+
+    structure_id = Column(Integer, primary_key=True, autoincrement=True)
+    system_id = Column(Integer, ForeignKey("star_systems.system_id"), nullable=False)
+    player_index = Column(Integer, nullable=False)
+    structure_type = Column(String(20), nullable=False)  # "mine" or "shipyard"
+
+    system = relationship("StarSystem", backref="structures")
+
+
+class Turn(GameBase):
+    __tablename__ = "turns"
+
+    turn_id = Column(Integer, primary_key=True)  # 1-based, not autoincrement
+    status = Column(String(20), nullable=False, default="active")  # "active" or "resolved"
+    resolved_at = Column(DateTime, nullable=True)

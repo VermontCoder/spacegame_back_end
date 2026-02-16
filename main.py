@@ -10,9 +10,14 @@ from sqlalchemy.orm import Session
 from auth import create_access_token, get_current_user, hash_password, verify_password
 from database import Base, create_game_database, engine, get_db, get_game_session
 from map_generator import generate_map
-from models import Game, GamePlayer, JumpLine, StarSystem, User
+from models import Game, GamePlayer, JumpLine, Ship, StarSystem, Structure, Turn, User
 
 app = FastAPI()
+
+PLAYER_COLORS = [
+    '#e74c3c', '#3498db', '#2ecc71', '#f39c12',
+    '#9b59b6', '#1abc9c', '#e67e22', '#34495e',
+]
 
 # Create admin tables (users, games) on startup
 Base.metadata.create_all(bind=engine)
@@ -20,7 +25,7 @@ Base.metadata.create_all(bind=engine)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "https://spacegame-front-end.onrender.com"],
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],
 )
 
@@ -145,10 +150,14 @@ class GenerateMapRequest(BaseModel):
 
 
 def _save_map_to_game_db(game_id: int, map_data: dict):
-    """Save generated map data (systems + jump lines) to a game's database."""
+    """Save generated map data (systems + jump lines) to a game's database,
+    then initialize starting ships, structures, and Turn 1."""
     game_db = get_game_session(game_id)
     try:
         game_db.query(JumpLine).delete()
+        game_db.query(Ship).delete()
+        game_db.query(Structure).delete()
+        game_db.query(Turn).delete()
         game_db.query(StarSystem).delete()
 
         gen_id_to_db_id = {}
@@ -175,6 +184,20 @@ def _save_map_to_game_db(game_id: int, map_data: dict):
             )
             game_db.add(jump)
 
+        # Initialize starting pieces on home systems and Founder's World
+        for sys_data in map_data["systems"]:
+            db_id = gen_id_to_db_id[sys_data["id"]]
+            if sys_data["is_home_system"] and sys_data["owner_player_index"] is not None:
+                pi = sys_data["owner_player_index"]
+                game_db.add(Ship(system_id=db_id, player_index=pi, count=1))
+                game_db.add(Structure(system_id=db_id, player_index=pi, structure_type="mine"))
+                game_db.add(Structure(system_id=db_id, player_index=pi, structure_type="shipyard"))
+            elif sys_data["is_founders_world"]:
+                game_db.add(Ship(system_id=db_id, player_index=-1, count=300))
+
+        # Create Turn 1
+        game_db.add(Turn(turn_id=1, status="active"))
+
         game_db.commit()
     finally:
         game_db.close()
@@ -187,6 +210,7 @@ def _generate_and_save_map(game: Game, db: Session):
     _save_map_to_game_db(game.game_id, map_data)
     game.seed = seed
     game.status = "active"
+    game.current_turn = 1
     db.commit()
 
 
@@ -367,12 +391,38 @@ def get_game_map(game_id: int, db: Session = Depends(get_db)):
             raise HTTPException(status_code=404, detail="Map not generated yet")
 
         jump_lines = game_db.query(JumpLine).all()
+        ships = game_db.query(Ship).all()
+        structures = game_db.query(Structure).all()
+
+        # Build players array from admin DB
+        player_rows = (
+            db.query(GamePlayer, User)
+            .join(User, GamePlayer.user_id == User.user_id)
+            .filter(GamePlayer.game_id == game_id)
+            .order_by(GamePlayer.player_index)
+            .all()
+        )
+
+        # Find home system names for each player
+        home_systems = {s.owner_player_index: s.name for s in systems if s.is_home_system}
+
+        players = [
+            {
+                "player_index": gp.player_index,
+                "username": u.username,
+                "color": PLAYER_COLORS[gp.player_index % len(PLAYER_COLORS)],
+                "home_system_name": home_systems.get(gp.player_index),
+            }
+            for gp, u in player_rows
+        ]
 
         return {
             "game_id": game_id,
             "game_name": game.name,
             "num_players": game.num_players,
             "seed": game.seed,
+            "status": game.status,
+            "current_turn": game.current_turn,
             "systems": [
                 {
                     "system_id": s.system_id,
@@ -396,6 +446,25 @@ def get_game_map(game_id: int, db: Session = Depends(get_db)):
                 }
                 for jl in jump_lines
             ],
+            "ships": [
+                {
+                    "ship_id": sh.ship_id,
+                    "system_id": sh.system_id,
+                    "player_index": sh.player_index,
+                    "count": sh.count,
+                }
+                for sh in ships
+            ],
+            "structures": [
+                {
+                    "structure_id": st.structure_id,
+                    "system_id": st.system_id,
+                    "player_index": st.player_index,
+                    "structure_type": st.structure_type,
+                }
+                for st in structures
+            ],
+            "players": players,
         }
     finally:
         game_db.close()
