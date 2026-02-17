@@ -36,7 +36,7 @@ def _build_clusters(num_players: int, rng: random.Random) -> list[dict]:
         clusters.append({
             "id": i,
             "is_home_cluster": True,
-            "player_index": i,
+            "player_index": i + 1,
             "system_ids": [],
         })
     num_neutral = max(1, rng.randint(1, max(1, num_players // 2 + 1)))

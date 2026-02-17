@@ -348,8 +348,11 @@ def express_start(req: CreateGameRequest, db: Session = Depends(get_db), current
     db.add(GamePlayer(game_id=game.game_id, user_id=current_user.user_id, player_index=1))
     db.commit()
 
-    # Fill remaining slots with test_user accounts
-    test_users = db.query(User).filter(User.username.like("test_user%")).order_by(User.user_id).all()
+    # Fill remaining slots with test_user accounts (skip the creator)
+    test_users = db.query(User).filter(
+        User.username.like("test_user%"),
+        User.user_id != current_user.user_id,
+    ).order_by(User.user_id).all()
     needed = req.num_players - 1
     if len(test_users) < needed:
         raise HTTPException(status_code=400, detail=f"Need {needed} test_user accounts but only found {len(test_users)}")
