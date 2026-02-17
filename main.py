@@ -4,7 +4,7 @@ import random
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sqlalchemy import text
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 from auth import create_access_token, get_current_user, hash_password, verify_password
@@ -514,5 +514,238 @@ def get_turn_status(game_id: int, turn_id: int, db: Session = Depends(get_db),
             }
             for s in statuses
         ]
+    finally:
+        game_db.close()
+
+
+# --- Order models and endpoints ---
+
+class MaterialSourceInput(BaseModel):
+    system_id: int
+    amount: int
+
+
+class CreateOrderRequest(BaseModel):
+    order_type: str
+    source_system_id: int
+    target_system_id: int | None = None
+    quantity: int | None = None
+    material_sources: list[MaterialSourceInput] | None = None
+
+
+def _committed_ships_out(game_db, turn_id: int, player_index: int, system_id: int) -> int:
+    """Sum of ships already ordered to move out of a system this turn."""
+    orders = game_db.query(Order).filter(
+        Order.turn_id == turn_id,
+        Order.player_index == player_index,
+        Order.order_type == "move_ships",
+        Order.source_system_id == system_id,
+    ).all()
+    return sum(o.quantity or 0 for o in orders)
+
+
+def _committed_materials(game_db, turn_id: int, player_index: int, system_id: int) -> int:
+    """Materials already committed from a system by pending orders this turn."""
+    total = 0
+    # Shipyard orders (30 each from source)
+    yard_orders = game_db.query(Order).filter(
+        Order.turn_id == turn_id,
+        Order.player_index == player_index,
+        Order.order_type == "build_shipyard",
+        Order.source_system_id == system_id,
+    ).all()
+    total += len(yard_orders) * 30
+
+    # Build_ships orders (quantity each from source)
+    ship_orders = game_db.query(Order).filter(
+        Order.turn_id == turn_id,
+        Order.player_index == player_index,
+        Order.order_type == "build_ships",
+        Order.source_system_id == system_id,
+    ).all()
+    total += sum(o.quantity or 0 for o in ship_orders)
+
+    # Material sources for build_mine that draw from this system
+    mine_total = game_db.query(func.coalesce(func.sum(OrderMaterialSource.amount), 0)).join(
+        Order, OrderMaterialSource.order_id == Order.order_id
+    ).filter(
+        Order.turn_id == turn_id,
+        Order.player_index == player_index,
+        OrderMaterialSource.source_system_id == system_id,
+    ).scalar()
+    total += mine_total
+
+    return total
+
+
+def _are_adjacent(game_db, sys_a_id: int, sys_b_id: int) -> bool:
+    """Check if two systems are connected by a jump line."""
+    jl = game_db.query(JumpLine).filter(
+        ((JumpLine.from_system_id == sys_a_id) & (JumpLine.to_system_id == sys_b_id)) |
+        ((JumpLine.from_system_id == sys_b_id) & (JumpLine.to_system_id == sys_a_id))
+    ).first()
+    return jl is not None
+
+
+@app.post("/games/{game_id}/turns/{turn_id}/orders")
+def create_order(game_id: int, turn_id: int, req: CreateOrderRequest,
+                 db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    game = db.query(Game).filter(Game.game_id == game_id).first()
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+
+    player_index = _get_player_index(game_id, current_user.user_id, db)
+
+    game_db = get_game_session(game_id)
+    try:
+        # Check player hasn't already submitted
+        pts = game_db.query(PlayerTurnStatus).filter(
+            PlayerTurnStatus.turn_id == turn_id,
+            PlayerTurnStatus.player_index == player_index,
+        ).first()
+        if pts and pts.submitted:
+            raise HTTPException(status_code=400, detail="Turn already submitted")
+
+        source = game_db.query(StarSystem).filter(StarSystem.system_id == req.source_system_id).first()
+        if not source:
+            raise HTTPException(status_code=400, detail="Source system not found")
+
+        if req.order_type == "move_ships":
+            if source.owner_player_index != player_index:
+                raise HTTPException(status_code=400, detail="You don't own the source system")
+            if req.target_system_id is None:
+                raise HTTPException(status_code=400, detail="target_system_id required for move_ships")
+            if not _are_adjacent(game_db, req.source_system_id, req.target_system_id):
+                raise HTTPException(status_code=400, detail="Target system is not adjacent")
+            if req.quantity is None or req.quantity < 1:
+                raise HTTPException(status_code=400, detail="quantity must be >= 1")
+
+            ship = game_db.query(Ship).filter(
+                Ship.system_id == req.source_system_id, Ship.player_index == player_index
+            ).first()
+            available = (ship.count if ship else 0) - _committed_ships_out(game_db, turn_id, player_index, req.source_system_id)
+            if req.quantity > available:
+                raise HTTPException(status_code=400, detail=f"Only {available} ships available")
+
+            order = Order(turn_id=turn_id, player_index=player_index, order_type="move_ships",
+                          source_system_id=req.source_system_id, target_system_id=req.target_system_id,
+                          quantity=req.quantity)
+            game_db.add(order)
+            game_db.commit()
+            game_db.refresh(order)
+
+        elif req.order_type == "build_mine":
+            if source.owner_player_index != player_index:
+                raise HTTPException(status_code=400, detail="You don't own the source system")
+            existing_mine = game_db.query(Structure).filter(
+                Structure.system_id == req.source_system_id, Structure.structure_type == "mine"
+            ).first()
+            if existing_mine:
+                raise HTTPException(status_code=400, detail="System already has a mine")
+            dup_order = game_db.query(Order).filter(
+                Order.turn_id == turn_id, Order.player_index == player_index,
+                Order.order_type == "build_mine", Order.source_system_id == req.source_system_id,
+            ).first()
+            if dup_order:
+                raise HTTPException(status_code=400, detail="Already ordered a mine here this turn")
+
+            if not req.material_sources or len(req.material_sources) == 0:
+                raise HTTPException(status_code=400, detail="material_sources required for build_mine")
+            total = sum(ms.amount for ms in req.material_sources)
+            if total != 15:
+                raise HTTPException(status_code=400, detail=f"Material sources must sum to 15, got {total}")
+
+            for ms in req.material_sources:
+                ms_sys = game_db.query(StarSystem).filter(StarSystem.system_id == ms.system_id).first()
+                if not ms_sys or ms_sys.owner_player_index != player_index:
+                    raise HTTPException(status_code=400, detail=f"System {ms.system_id} not owned by you")
+                committed = _committed_materials(game_db, turn_id, player_index, ms.system_id)
+                available_mat = ms_sys.materials - committed
+                if ms.amount > available_mat:
+                    raise HTTPException(status_code=400, detail=f"System {ms_sys.name} only has {available_mat} materials available")
+
+            order = Order(turn_id=turn_id, player_index=player_index, order_type="build_mine",
+                          source_system_id=req.source_system_id)
+            game_db.add(order)
+            game_db.flush()
+            for ms in req.material_sources:
+                game_db.add(OrderMaterialSource(order_id=order.order_id, source_system_id=ms.system_id, amount=ms.amount))
+            game_db.commit()
+            game_db.refresh(order)
+
+        elif req.order_type == "build_shipyard":
+            if source.owner_player_index != player_index:
+                raise HTTPException(status_code=400, detail="You don't own the source system")
+            existing_mine = game_db.query(Structure).filter(
+                Structure.system_id == req.source_system_id, Structure.structure_type == "mine"
+            ).first()
+            if not existing_mine:
+                raise HTTPException(status_code=400, detail="System must have an existing mine")
+            existing_yard = game_db.query(Structure).filter(
+                Structure.system_id == req.source_system_id, Structure.structure_type == "shipyard"
+            ).first()
+            if existing_yard:
+                raise HTTPException(status_code=400, detail="System already has a shipyard")
+            dup_order = game_db.query(Order).filter(
+                Order.turn_id == turn_id, Order.player_index == player_index,
+                Order.order_type == "build_shipyard", Order.source_system_id == req.source_system_id,
+            ).first()
+            if dup_order:
+                raise HTTPException(status_code=400, detail="Already ordered a shipyard here this turn")
+
+            committed = _committed_materials(game_db, turn_id, player_index, req.source_system_id)
+            available_mat = source.materials - committed
+            if available_mat < 30:
+                raise HTTPException(status_code=400, detail=f"Need 30 materials, only {available_mat} available")
+
+            order = Order(turn_id=turn_id, player_index=player_index, order_type="build_shipyard",
+                          source_system_id=req.source_system_id)
+            game_db.add(order)
+            game_db.commit()
+            game_db.refresh(order)
+
+        elif req.order_type == "build_ships":
+            if source.owner_player_index != player_index:
+                raise HTTPException(status_code=400, detail="You don't own the source system")
+            existing_mine = game_db.query(Structure).filter(
+                Structure.system_id == req.source_system_id, Structure.structure_type == "mine"
+            ).first()
+            existing_yard = game_db.query(Structure).filter(
+                Structure.system_id == req.source_system_id, Structure.structure_type == "shipyard"
+            ).first()
+            if not existing_mine or not existing_yard:
+                raise HTTPException(status_code=400, detail="System must have an existing mine and shipyard")
+            if req.quantity is None or req.quantity < 1:
+                raise HTTPException(status_code=400, detail="quantity must be >= 1")
+
+            committed = _committed_materials(game_db, turn_id, player_index, req.source_system_id)
+            available_mat = source.materials - committed
+            if req.quantity > available_mat:
+                raise HTTPException(status_code=400, detail=f"Only {available_mat} materials available")
+
+            order = Order(turn_id=turn_id, player_index=player_index, order_type="build_ships",
+                          source_system_id=req.source_system_id, quantity=req.quantity)
+            game_db.add(order)
+            game_db.commit()
+            game_db.refresh(order)
+
+        else:
+            raise HTTPException(status_code=400, detail=f"Unknown order_type: {req.order_type}")
+
+        result = {
+            "order_id": order.order_id,
+            "turn_id": order.turn_id,
+            "player_index": order.player_index,
+            "order_type": order.order_type,
+            "source_system_id": order.source_system_id,
+            "target_system_id": order.target_system_id,
+            "quantity": order.quantity,
+        }
+        if order.order_type == "build_mine":
+            result["material_sources"] = [
+                {"system_id": ms.source_system_id, "amount": ms.amount}
+                for ms in order.material_sources
+            ]
+        return result
     finally:
         game_db.close()

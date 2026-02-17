@@ -254,3 +254,94 @@ def test_get_turn_status_returns_all_players(client, auth_headers, game_db_sessi
         assert "player_index" in entry
         assert "username" in entry
         assert entry["submitted"] is False
+
+
+def _setup_2p_game(client, auth_headers, monkeypatch):
+    """Helper: create a 2-player express-start game and return game_id."""
+    import main
+    monkeypatch.setattr(main, "_is_dev_mode", lambda: True)
+    for i in range(1, 2):
+        client.post("/auth/register", json={
+            "username": f"test_user{i}", "first_name": f"T{i}",
+            "last_name": f"U{i}", "email": f"tu{i}@example.com", "password": "p",
+        })
+    resp = client.post("/games/express-start", json={
+        "name": "Order Test", "num_players": 2,
+    }, headers=auth_headers)
+    return resp.json()["game_id"]
+
+
+def test_create_move_order_success(client, auth_headers, game_db_session, monkeypatch):
+    """POST move_ships order succeeds for valid adjacent move."""
+    game_id = _setup_2p_game(client, auth_headers, monkeypatch)
+
+    # Find player 1's home system and an adjacent system
+    from models import Ship, JumpLine
+    ship = game_db_session.query(Ship).filter(Ship.player_index == 1).first()
+    home_id = ship.system_id
+    jl = game_db_session.query(JumpLine).filter(
+        (JumpLine.from_system_id == home_id) | (JumpLine.to_system_id == home_id)
+    ).first()
+    target_id = jl.to_system_id if jl.from_system_id == home_id else jl.from_system_id
+
+    resp = client.post(f"/games/{game_id}/turns/1/orders", json={
+        "order_type": "move_ships",
+        "source_system_id": home_id,
+        "target_system_id": target_id,
+        "quantity": 1,
+    }, headers=auth_headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["order_type"] == "move_ships"
+    assert data["order_id"] is not None
+
+
+def test_create_move_order_not_adjacent(client, auth_headers, game_db_session, monkeypatch):
+    """POST move_ships to non-adjacent system fails."""
+    game_id = _setup_2p_game(client, auth_headers, monkeypatch)
+
+    from models import Ship, StarSystem, JumpLine
+    ship = game_db_session.query(Ship).filter(Ship.player_index == 1).first()
+    home_id = ship.system_id
+
+    # Find a system NOT adjacent to home
+    adjacent_ids = set()
+    for jl in game_db_session.query(JumpLine).filter(
+        (JumpLine.from_system_id == home_id) | (JumpLine.to_system_id == home_id)
+    ).all():
+        adjacent_ids.add(jl.to_system_id if jl.from_system_id == home_id else jl.from_system_id)
+
+    non_adjacent = game_db_session.query(StarSystem).filter(
+        StarSystem.system_id != home_id,
+        ~StarSystem.system_id.in_(adjacent_ids)
+    ).first()
+
+    if non_adjacent:
+        resp = client.post(f"/games/{game_id}/turns/1/orders", json={
+            "order_type": "move_ships",
+            "source_system_id": home_id,
+            "target_system_id": non_adjacent.system_id,
+            "quantity": 1,
+        }, headers=auth_headers)
+        assert resp.status_code == 400
+
+
+def test_create_move_order_exceeds_ships(client, auth_headers, game_db_session, monkeypatch):
+    """POST move_ships with quantity > available ships fails."""
+    game_id = _setup_2p_game(client, auth_headers, monkeypatch)
+
+    from models import Ship, JumpLine
+    ship = game_db_session.query(Ship).filter(Ship.player_index == 1).first()
+    home_id = ship.system_id
+    jl = game_db_session.query(JumpLine).filter(
+        (JumpLine.from_system_id == home_id) | (JumpLine.to_system_id == home_id)
+    ).first()
+    target_id = jl.to_system_id if jl.from_system_id == home_id else jl.from_system_id
+
+    resp = client.post(f"/games/{game_id}/turns/1/orders", json={
+        "order_type": "move_ships",
+        "source_system_id": home_id,
+        "target_system_id": target_id,
+        "quantity": 999,
+    }, headers=auth_headers)
+    assert resp.status_code == 400
