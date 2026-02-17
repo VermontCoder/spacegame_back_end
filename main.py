@@ -749,3 +749,72 @@ def create_order(game_id: int, turn_id: int, req: CreateOrderRequest,
         return result
     finally:
         game_db.close()
+
+
+@app.get("/games/{game_id}/turns/{turn_id}/orders")
+def get_orders(game_id: int, turn_id: int, db: Session = Depends(get_db),
+               current_user: User = Depends(get_current_user)):
+    game = db.query(Game).filter(Game.game_id == game_id).first()
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+
+    player_index = _get_player_index(game_id, current_user.user_id, db)
+
+    game_db = get_game_session(game_id)
+    try:
+        orders = game_db.query(Order).filter(
+            Order.turn_id == turn_id, Order.player_index == player_index
+        ).all()
+
+        result = []
+        for o in orders:
+            entry = {
+                "order_id": o.order_id,
+                "turn_id": o.turn_id,
+                "player_index": o.player_index,
+                "order_type": o.order_type,
+                "source_system_id": o.source_system_id,
+                "target_system_id": o.target_system_id,
+                "quantity": o.quantity,
+            }
+            if o.order_type == "build_mine":
+                entry["material_sources"] = [
+                    {"system_id": ms.source_system_id, "amount": ms.amount}
+                    for ms in o.material_sources
+                ]
+            result.append(entry)
+        return result
+    finally:
+        game_db.close()
+
+
+@app.delete("/games/{game_id}/turns/{turn_id}/orders/{order_id}")
+def delete_order(game_id: int, turn_id: int, order_id: int,
+                 db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    game = db.query(Game).filter(Game.game_id == game_id).first()
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+
+    player_index = _get_player_index(game_id, current_user.user_id, db)
+
+    game_db = get_game_session(game_id)
+    try:
+        pts = game_db.query(PlayerTurnStatus).filter(
+            PlayerTurnStatus.turn_id == turn_id,
+            PlayerTurnStatus.player_index == player_index,
+        ).first()
+        if pts and pts.submitted:
+            raise HTTPException(status_code=400, detail="Turn already submitted")
+
+        order = game_db.query(Order).filter(
+            Order.order_id == order_id, Order.turn_id == turn_id,
+            Order.player_index == player_index,
+        ).first()
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found")
+
+        game_db.delete(order)
+        game_db.commit()
+        return {"status": "deleted", "order_id": order_id}
+    finally:
+        game_db.close()

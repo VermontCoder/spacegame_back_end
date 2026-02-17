@@ -345,3 +345,52 @@ def test_create_move_order_exceeds_ships(client, auth_headers, game_db_session, 
         "quantity": 999,
     }, headers=auth_headers)
     assert resp.status_code == 400
+
+
+def test_get_orders_returns_player_orders(client, auth_headers, game_db_session, monkeypatch):
+    """GET /orders returns the current player's orders."""
+    game_id = _setup_2p_game(client, auth_headers, monkeypatch)
+
+    from models import Ship, JumpLine
+    ship = game_db_session.query(Ship).filter(Ship.player_index == 1).first()
+    home_id = ship.system_id
+    jl = game_db_session.query(JumpLine).filter(
+        (JumpLine.from_system_id == home_id) | (JumpLine.to_system_id == home_id)
+    ).first()
+    target_id = jl.to_system_id if jl.from_system_id == home_id else jl.from_system_id
+
+    client.post(f"/games/{game_id}/turns/1/orders", json={
+        "order_type": "move_ships", "source_system_id": home_id,
+        "target_system_id": target_id, "quantity": 1,
+    }, headers=auth_headers)
+
+    resp = client.get(f"/games/{game_id}/turns/1/orders", headers=auth_headers)
+    assert resp.status_code == 200
+    orders = resp.json()
+    assert len(orders) == 1
+    assert orders[0]["order_type"] == "move_ships"
+
+
+def test_delete_order_success(client, auth_headers, game_db_session, monkeypatch):
+    """DELETE /orders/{id} removes the order."""
+    game_id = _setup_2p_game(client, auth_headers, monkeypatch)
+
+    from models import Ship, JumpLine
+    ship = game_db_session.query(Ship).filter(Ship.player_index == 1).first()
+    home_id = ship.system_id
+    jl = game_db_session.query(JumpLine).filter(
+        (JumpLine.from_system_id == home_id) | (JumpLine.to_system_id == home_id)
+    ).first()
+    target_id = jl.to_system_id if jl.from_system_id == home_id else jl.from_system_id
+
+    create_resp = client.post(f"/games/{game_id}/turns/1/orders", json={
+        "order_type": "move_ships", "source_system_id": home_id,
+        "target_system_id": target_id, "quantity": 1,
+    }, headers=auth_headers)
+    order_id = create_resp.json()["order_id"]
+
+    del_resp = client.delete(f"/games/{game_id}/turns/1/orders/{order_id}", headers=auth_headers)
+    assert del_resp.status_code == 200
+
+    get_resp = client.get(f"/games/{game_id}/turns/1/orders", headers=auth_headers)
+    assert len(get_resp.json()) == 0
