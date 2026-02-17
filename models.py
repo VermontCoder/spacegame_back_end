@@ -106,3 +106,41 @@ class Turn(GameBase):
     turn_id = Column(Integer, primary_key=True)  # 1-based, not autoincrement
     status = Column(String(20), nullable=False, default="active")  # "active" or "resolved"
     resolved_at = Column(DateTime, nullable=True)
+
+
+class Order(GameBase):
+    __tablename__ = "orders"
+
+    order_id = Column(Integer, primary_key=True, autoincrement=True)
+    turn_id = Column(Integer, nullable=False)
+    player_index = Column(Integer, nullable=False)
+    order_type = Column(String(20), nullable=False)
+    source_system_id = Column(Integer, ForeignKey("star_systems.system_id"), nullable=False)
+    target_system_id = Column(Integer, ForeignKey("star_systems.system_id"), nullable=True)
+    quantity = Column(Integer, nullable=True)
+
+    source_system = relationship("StarSystem", foreign_keys=[source_system_id])
+    target_system = relationship("StarSystem", foreign_keys=[target_system_id])
+    material_sources = relationship("OrderMaterialSource", back_populates="order", cascade="all, delete-orphan")
+
+
+class OrderMaterialSource(GameBase):
+    __tablename__ = "order_material_sources"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    order_id = Column(Integer, ForeignKey("orders.order_id"), nullable=False)
+    source_system_id = Column(Integer, ForeignKey("star_systems.system_id"), nullable=False)
+    amount = Column(Integer, nullable=False)
+
+    order = relationship("Order", back_populates="material_sources")
+    source_system = relationship("StarSystem")
+
+
+class PlayerTurnStatus(GameBase):
+    __tablename__ = "player_turn_status"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    turn_id = Column(Integer, nullable=False)
+    player_index = Column(Integer, nullable=False)
+    submitted = Column(Boolean, nullable=False, default=False)
+    submitted_at = Column(DateTime, nullable=True)
