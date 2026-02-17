@@ -148,6 +148,33 @@ def test_map_endpoint_includes_ships_and_structures(client, auth_headers, monkey
         assert "home_system_name" in p
 
 
+def test_express_start_creates_player_turn_status(client, auth_headers, game_db_session, monkeypatch):
+    """Express start creates a PlayerTurnStatus row per player for Turn 1."""
+    import main
+    monkeypatch.setattr(main, "_is_dev_mode", lambda: True)
+
+    for i in range(1, 2):
+        client.post("/auth/register", json={
+            "username": f"test_user{i}",
+            "first_name": f"Test{i}",
+            "last_name": f"User{i}",
+            "email": f"test_user{i}@example.com",
+            "password": "testpass",
+        })
+
+    client.post("/games/express-start", json={
+        "name": "PTS Test",
+        "num_players": 2,
+    }, headers=auth_headers)
+
+    from models import PlayerTurnStatus
+    statuses = game_db_session.query(PlayerTurnStatus).all()
+    assert len(statuses) == 2
+    for s in statuses:
+        assert s.turn_id == 1
+        assert s.submitted is False
+
+
 def test_map_endpoint_players_have_correct_colors(client, auth_headers, monkeypatch):
     """Player colors should be assigned from PLAYER_COLORS by player_index."""
     import main

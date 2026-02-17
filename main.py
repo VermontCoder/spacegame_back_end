@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from auth import create_access_token, get_current_user, hash_password, verify_password
 from database import Base, create_game_database, engine, get_db, get_game_session
 from map_generator import generate_map
-from models import Game, GamePlayer, JumpLine, Ship, StarSystem, Structure, Turn, User
+from models import Game, GamePlayer, JumpLine, Order, OrderMaterialSource, PlayerTurnStatus, Ship, StarSystem, Structure, Turn, User
 
 app = FastAPI()
 
@@ -149,7 +149,7 @@ class GenerateMapRequest(BaseModel):
     seed: int | None = None
 
 
-def _save_map_to_game_db(game_id: int, map_data: dict):
+def _save_map_to_game_db(game_id: int, map_data: dict, num_players: int):
     """Save generated map data (systems + jump lines) to a game's database,
     then initialize starting ships, structures, and Turn 1."""
     game_db = get_game_session(game_id)
@@ -198,6 +198,10 @@ def _save_map_to_game_db(game_id: int, map_data: dict):
         # Create Turn 1
         game_db.add(Turn(turn_id=1, status="active"))
 
+        # Create PlayerTurnStatus for each player
+        for pi in range(1, num_players + 1):
+            game_db.add(PlayerTurnStatus(turn_id=1, player_index=pi, submitted=False))
+
         game_db.commit()
     finally:
         game_db.close()
@@ -207,7 +211,7 @@ def _generate_and_save_map(game: Game, db: Session):
     """Generate map with random seed, save to game DB, set status to active."""
     seed = random.randint(0, 2**31)
     map_data = generate_map(game.num_players, seed=seed)
-    _save_map_to_game_db(game.game_id, map_data)
+    _save_map_to_game_db(game.game_id, map_data, game.num_players)
     game.seed = seed
     game.status = "active"
     game.current_turn = 1
@@ -372,7 +376,7 @@ def generate_game_map(game_id: int, req: GenerateMapRequest, db: Session = Depen
     game.status = "map_generated"
     db.commit()
 
-    _save_map_to_game_db(game_id, map_data)
+    _save_map_to_game_db(game_id, map_data, game.num_players)
 
     return {"status": "generated", "seed": seed, "num_systems": len(map_data["systems"])}
 
