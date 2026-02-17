@@ -1,5 +1,6 @@
 import os
 import random
+from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -816,5 +817,34 @@ def delete_order(game_id: int, turn_id: int, order_id: int,
         game_db.delete(order)
         game_db.commit()
         return {"status": "deleted", "order_id": order_id}
+    finally:
+        game_db.close()
+
+
+@app.post("/games/{game_id}/turns/{turn_id}/submit")
+def submit_turn(game_id: int, turn_id: int, db: Session = Depends(get_db),
+                current_user: User = Depends(get_current_user)):
+    game = db.query(Game).filter(Game.game_id == game_id).first()
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+
+    player_index = _get_player_index(game_id, current_user.user_id, db)
+
+    game_db = get_game_session(game_id)
+    try:
+        pts = game_db.query(PlayerTurnStatus).filter(
+            PlayerTurnStatus.turn_id == turn_id,
+            PlayerTurnStatus.player_index == player_index,
+        ).first()
+        if not pts:
+            raise HTTPException(status_code=404, detail="Turn status not found")
+        if pts.submitted:
+            raise HTTPException(status_code=400, detail="Already submitted")
+
+        pts.submitted = True
+        pts.submitted_at = datetime.now(timezone.utc)
+        game_db.commit()
+
+        return {"player_index": player_index, "submitted": True}
     finally:
         game_db.close()

@@ -394,3 +394,63 @@ def test_delete_order_success(client, auth_headers, game_db_session, monkeypatch
 
     get_resp = client.get(f"/games/{game_id}/turns/1/orders", headers=auth_headers)
     assert len(get_resp.json()) == 0
+
+
+def test_submit_turn_success(client, auth_headers, game_db_session, monkeypatch):
+    """POST /submit marks player as submitted."""
+    game_id = _setup_2p_game(client, auth_headers, monkeypatch)
+
+    resp = client.post(f"/games/{game_id}/turns/1/submit", headers=auth_headers)
+    assert resp.status_code == 200
+    assert resp.json()["submitted"] is True
+
+    # Verify in status endpoint
+    status_resp = client.get(f"/games/{game_id}/turns/1/status", headers=auth_headers)
+    statuses = status_resp.json()
+    p1 = [s for s in statuses if s["player_index"] == 1][0]
+    assert p1["submitted"] is True
+
+
+def test_submit_turn_prevents_new_orders(client, auth_headers, game_db_session, monkeypatch):
+    """After submitting, creating new orders fails."""
+    game_id = _setup_2p_game(client, auth_headers, monkeypatch)
+
+    client.post(f"/games/{game_id}/turns/1/submit", headers=auth_headers)
+
+    from models import Ship, JumpLine
+    ship = game_db_session.query(Ship).filter(Ship.player_index == 1).first()
+    home_id = ship.system_id
+    jl = game_db_session.query(JumpLine).filter(
+        (JumpLine.from_system_id == home_id) | (JumpLine.to_system_id == home_id)
+    ).first()
+    target_id = jl.to_system_id if jl.from_system_id == home_id else jl.from_system_id
+
+    resp = client.post(f"/games/{game_id}/turns/1/orders", json={
+        "order_type": "move_ships", "source_system_id": home_id,
+        "target_system_id": target_id, "quantity": 1,
+    }, headers=auth_headers)
+    assert resp.status_code == 400
+
+
+def test_submit_turn_prevents_delete(client, auth_headers, game_db_session, monkeypatch):
+    """After submitting, deleting orders fails."""
+    game_id = _setup_2p_game(client, auth_headers, monkeypatch)
+
+    from models import Ship, JumpLine
+    ship = game_db_session.query(Ship).filter(Ship.player_index == 1).first()
+    home_id = ship.system_id
+    jl = game_db_session.query(JumpLine).filter(
+        (JumpLine.from_system_id == home_id) | (JumpLine.to_system_id == home_id)
+    ).first()
+    target_id = jl.to_system_id if jl.from_system_id == home_id else jl.from_system_id
+
+    create_resp = client.post(f"/games/{game_id}/turns/1/orders", json={
+        "order_type": "move_ships", "source_system_id": home_id,
+        "target_system_id": target_id, "quantity": 1,
+    }, headers=auth_headers)
+    order_id = create_resp.json()["order_id"]
+
+    client.post(f"/games/{game_id}/turns/1/submit", headers=auth_headers)
+
+    del_resp = client.delete(f"/games/{game_id}/turns/1/orders/{order_id}", headers=auth_headers)
+    assert del_resp.status_code == 400
