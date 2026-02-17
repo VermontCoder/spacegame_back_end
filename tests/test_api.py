@@ -225,3 +225,32 @@ def test_get_map_before_generation(client, auth_headers):
     game_id = game_resp.json()["game_id"]
     response = client.get(f"/games/{game_id}/map")
     assert response.status_code == 404
+
+
+def test_get_turn_status_returns_all_players(client, auth_headers, game_db_session, monkeypatch):
+    """GET /games/{id}/turns/1/status returns submission status for all players."""
+    import main
+    monkeypatch.setattr(main, "_is_dev_mode", lambda: True)
+
+    for i in range(1, 2):
+        client.post("/auth/register", json={
+            "username": f"test_user{i}",
+            "first_name": f"Test{i}",
+            "last_name": f"User{i}",
+            "email": f"test_user{i}@example.com",
+            "password": "testpass",
+        })
+
+    game_resp = client.post("/games/express-start", json={
+        "name": "Status Test", "num_players": 2,
+    }, headers=auth_headers)
+    game_id = game_resp.json()["game_id"]
+
+    resp = client.get(f"/games/{game_id}/turns/1/status", headers=auth_headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) == 2
+    for entry in data:
+        assert "player_index" in entry
+        assert "username" in entry
+        assert entry["submitted"] is False

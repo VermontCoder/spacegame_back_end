@@ -472,3 +472,47 @@ def get_game_map(game_id: int, db: Session = Depends(get_db)):
         }
     finally:
         game_db.close()
+
+
+def _get_player_index(game_id: int, user_id: int, db: Session) -> int:
+    """Look up the player_index for a user in a game. Raises 403 if not a member."""
+    gp = db.query(GamePlayer).filter(
+        GamePlayer.game_id == game_id, GamePlayer.user_id == user_id
+    ).first()
+    if not gp:
+        raise HTTPException(status_code=403, detail="You are not a player in this game")
+    return gp.player_index
+
+
+@app.get("/games/{game_id}/turns/{turn_id}/status")
+def get_turn_status(game_id: int, turn_id: int, db: Session = Depends(get_db),
+                    current_user: User = Depends(get_current_user)):
+    game = db.query(Game).filter(Game.game_id == game_id).first()
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+
+    game_db = get_game_session(game_id)
+    try:
+        statuses = game_db.query(PlayerTurnStatus).filter(
+            PlayerTurnStatus.turn_id == turn_id
+        ).order_by(PlayerTurnStatus.player_index).all()
+
+        # Build username lookup from admin DB
+        player_rows = (
+            db.query(GamePlayer, User)
+            .join(User, GamePlayer.user_id == User.user_id)
+            .filter(GamePlayer.game_id == game_id)
+            .all()
+        )
+        username_map = {gp.player_index: u.username for gp, u in player_rows}
+
+        return [
+            {
+                "player_index": s.player_index,
+                "username": username_map.get(s.player_index, f"Player {s.player_index}"),
+                "submitted": s.submitted,
+            }
+            for s in statuses
+        ]
+    finally:
+        game_db.close()
