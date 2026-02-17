@@ -659,7 +659,11 @@ def create_order(game_id: int, turn_id: int, req: CreateOrderRequest,
             if total != 15:
                 raise HTTPException(status_code=400, detail=f"Material sources must sum to 15, got {total}")
 
+            if len(req.material_sources) != 1:
+                raise HTTPException(status_code=400, detail="build_mine requires exactly one material source system")
             for ms in req.material_sources:
+                if ms.system_id == req.source_system_id:
+                    raise HTTPException(status_code=400, detail="Material source must be a different system than the one being built on")
                 ms_sys = game_db.query(StarSystem).filter(StarSystem.system_id == ms.system_id).first()
                 if not ms_sys or ms_sys.owner_player_index != player_index:
                     raise HTTPException(status_code=400, detail=f"System {ms.system_id} not owned by you")
