@@ -20,6 +20,10 @@ PLAYER_COLORS = [
     '#9b59b6', '#1abc9c', '#e67e22', '#34495e',
 ]
 
+MINE_COST = 15
+SHIPYARD_COST = 30
+NEUTRAL_PLAYER_INDEX = -1  # Founder's World garrison
+
 # Create admin tables (users, games) on startup
 Base.metadata.create_all(bind=engine)
 
@@ -46,6 +50,16 @@ class LoginRequest(BaseModel):
     password: str
 
 
+def _user_to_dict(user: User) -> dict:
+    return {
+        "user_id": user.user_id,
+        "username": user.username,
+        "first_name": user.first_name,
+        "last_name": user.last_name,
+        "email": user.email,
+    }
+
+
 # --- Auth endpoints ---
 
 @app.post("/auth/register")
@@ -67,17 +81,7 @@ def register(req: RegisterRequest, db: Session = Depends(get_db)):
     db.refresh(user)
 
     token = create_access_token({"sub": str(user.user_id)})
-    return {
-        "access_token": token,
-        "token_type": "bearer",
-        "user": {
-            "user_id": user.user_id,
-            "username": user.username,
-            "first_name": user.first_name,
-            "last_name": user.last_name,
-            "email": user.email,
-        },
-    }
+    return {"access_token": token, "token_type": "bearer", "user": _user_to_dict(user)}
 
 
 @app.post("/auth/login")
@@ -87,28 +91,12 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
     token = create_access_token({"sub": str(user.user_id)})
-    return {
-        "access_token": token,
-        "token_type": "bearer",
-        "user": {
-            "user_id": user.user_id,
-            "username": user.username,
-            "first_name": user.first_name,
-            "last_name": user.last_name,
-            "email": user.email,
-        },
-    }
+    return {"access_token": token, "token_type": "bearer", "user": _user_to_dict(user)}
 
 
 @app.get("/auth/me")
 def get_me(current_user: User = Depends(get_current_user)):
-    return {
-        "user_id": current_user.user_id,
-        "username": current_user.username,
-        "first_name": current_user.first_name,
-        "last_name": current_user.last_name,
-        "email": current_user.email,
-    }
+    return _user_to_dict(current_user)
 
 
 # --- Game endpoints ---
@@ -162,7 +150,7 @@ def _save_map_to_game_db(game_id: int, map_data: dict, num_players: int):
                 game_db.add(Structure(system_id=db_id, player_index=pi, structure_type="mine"))
                 game_db.add(Structure(system_id=db_id, player_index=pi, structure_type="shipyard"))
             elif sys_data["is_founders_world"]:
-                game_db.add(Ship(system_id=db_id, player_index=-1, count=300))
+                game_db.add(Ship(system_id=db_id, player_index=NEUTRAL_PLAYER_INDEX, count=300))
 
         # Create Turn 1
         game_db.add(Turn(turn_id=1, status="active"))
@@ -508,7 +496,7 @@ def _committed_materials(game_db, turn_id: int, player_index: int, system_id: in
         Order.order_type == "build_shipyard",
         Order.source_system_id == system_id,
     ).all()
-    total += len(yard_orders) * 30
+    total += len(yard_orders) * SHIPYARD_COST
 
     # Build_ships orders (quantity each from source)
     ship_orders = game_db.query(Order).filter(
@@ -541,6 +529,43 @@ def _are_adjacent(game_db, sys_a_id: int, sys_b_id: int) -> bool:
     return jl is not None
 
 
+def _get_structure(game_db, system_id: int, structure_type: str):
+    """Return the Structure of the given type at a system, or None."""
+    return game_db.query(Structure).filter(
+        Structure.system_id == system_id,
+        Structure.structure_type == structure_type,
+    ).first()
+
+
+def _check_turn_not_submitted(game_db, turn_id: int, player_index: int):
+    """Raise 400 if the player has already submitted this turn."""
+    pts = game_db.query(PlayerTurnStatus).filter(
+        PlayerTurnStatus.turn_id == turn_id,
+        PlayerTurnStatus.player_index == player_index,
+    ).first()
+    if pts and pts.submitted:
+        raise HTTPException(status_code=400, detail="Turn already submitted")
+
+
+def _order_to_dict(order: Order) -> dict:
+    """Serialize an Order to the standard API response shape."""
+    result = {
+        "order_id": order.order_id,
+        "turn_id": order.turn_id,
+        "player_index": order.player_index,
+        "order_type": order.order_type,
+        "source_system_id": order.source_system_id,
+        "target_system_id": order.target_system_id,
+        "quantity": order.quantity,
+    }
+    if order.order_type == "build_mine":
+        result["material_sources"] = [
+            {"system_id": ms.source_system_id, "amount": ms.amount}
+            for ms in order.material_sources
+        ]
+    return result
+
+
 @app.post("/games/{game_id}/turns/{turn_id}/orders")
 def create_order(game_id: int, turn_id: int, req: CreateOrderRequest,
                  db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -553,12 +578,7 @@ def create_order(game_id: int, turn_id: int, req: CreateOrderRequest,
     game_db = get_game_session(game_id)
     try:
         # Check player hasn't already submitted
-        pts = game_db.query(PlayerTurnStatus).filter(
-            PlayerTurnStatus.turn_id == turn_id,
-            PlayerTurnStatus.player_index == player_index,
-        ).first()
-        if pts and pts.submitted:
-            raise HTTPException(status_code=400, detail="Turn already submitted")
+        _check_turn_not_submitted(game_db, turn_id, player_index)
 
         source = game_db.query(StarSystem).filter(StarSystem.system_id == req.source_system_id).first()
         if not source:
@@ -591,10 +611,7 @@ def create_order(game_id: int, turn_id: int, req: CreateOrderRequest,
         elif req.order_type == "build_mine":
             if source.owner_player_index != player_index:
                 raise HTTPException(status_code=400, detail="You don't own the source system")
-            existing_mine = game_db.query(Structure).filter(
-                Structure.system_id == req.source_system_id, Structure.structure_type == "mine"
-            ).first()
-            if existing_mine:
+            if _get_structure(game_db, req.source_system_id, "mine"):
                 raise HTTPException(status_code=400, detail="System already has a mine")
             dup_order = game_db.query(Order).filter(
                 Order.turn_id == turn_id, Order.player_index == player_index,
@@ -603,11 +620,11 @@ def create_order(game_id: int, turn_id: int, req: CreateOrderRequest,
             if dup_order:
                 raise HTTPException(status_code=400, detail="Already ordered a mine here this turn")
 
-            if not req.material_sources or len(req.material_sources) == 0:
+            if not req.material_sources:
                 raise HTTPException(status_code=400, detail="material_sources required for build_mine")
             total = sum(ms.amount for ms in req.material_sources)
-            if total != 15:
-                raise HTTPException(status_code=400, detail=f"Material sources must sum to 15, got {total}")
+            if total != MINE_COST:
+                raise HTTPException(status_code=400, detail=f"Material sources must sum to {MINE_COST}, got {total}")
 
             for ms in req.material_sources:
                 if ms.system_id == req.source_system_id:
@@ -632,15 +649,9 @@ def create_order(game_id: int, turn_id: int, req: CreateOrderRequest,
         elif req.order_type == "build_shipyard":
             if source.owner_player_index != player_index:
                 raise HTTPException(status_code=400, detail="You don't own the source system")
-            existing_mine = game_db.query(Structure).filter(
-                Structure.system_id == req.source_system_id, Structure.structure_type == "mine"
-            ).first()
-            if not existing_mine:
+            if not _get_structure(game_db, req.source_system_id, "mine"):
                 raise HTTPException(status_code=400, detail="System must have an existing mine")
-            existing_yard = game_db.query(Structure).filter(
-                Structure.system_id == req.source_system_id, Structure.structure_type == "shipyard"
-            ).first()
-            if existing_yard:
+            if _get_structure(game_db, req.source_system_id, "shipyard"):
                 raise HTTPException(status_code=400, detail="System already has a shipyard")
             dup_order = game_db.query(Order).filter(
                 Order.turn_id == turn_id, Order.player_index == player_index,
@@ -651,8 +662,8 @@ def create_order(game_id: int, turn_id: int, req: CreateOrderRequest,
 
             committed = _committed_materials(game_db, turn_id, player_index, req.source_system_id)
             available_mat = source.materials - committed
-            if available_mat < 30:
-                raise HTTPException(status_code=400, detail=f"Need 30 materials, only {available_mat} available")
+            if available_mat < SHIPYARD_COST:
+                raise HTTPException(status_code=400, detail=f"Need {SHIPYARD_COST} materials, only {available_mat} available")
 
             order = Order(turn_id=turn_id, player_index=player_index, order_type="build_shipyard",
                           source_system_id=req.source_system_id)
@@ -663,13 +674,8 @@ def create_order(game_id: int, turn_id: int, req: CreateOrderRequest,
         elif req.order_type == "build_ships":
             if source.owner_player_index != player_index:
                 raise HTTPException(status_code=400, detail="You don't own the source system")
-            existing_mine = game_db.query(Structure).filter(
-                Structure.system_id == req.source_system_id, Structure.structure_type == "mine"
-            ).first()
-            existing_yard = game_db.query(Structure).filter(
-                Structure.system_id == req.source_system_id, Structure.structure_type == "shipyard"
-            ).first()
-            if not existing_mine or not existing_yard:
+            if not _get_structure(game_db, req.source_system_id, "mine") or \
+               not _get_structure(game_db, req.source_system_id, "shipyard"):
                 raise HTTPException(status_code=400, detail="System must have an existing mine and shipyard")
             if req.quantity is None or req.quantity < 1:
                 raise HTTPException(status_code=400, detail="quantity must be >= 1")
@@ -688,21 +694,7 @@ def create_order(game_id: int, turn_id: int, req: CreateOrderRequest,
         else:
             raise HTTPException(status_code=400, detail=f"Unknown order_type: {req.order_type}")
 
-        result = {
-            "order_id": order.order_id,
-            "turn_id": order.turn_id,
-            "player_index": order.player_index,
-            "order_type": order.order_type,
-            "source_system_id": order.source_system_id,
-            "target_system_id": order.target_system_id,
-            "quantity": order.quantity,
-        }
-        if order.order_type == "build_mine":
-            result["material_sources"] = [
-                {"system_id": ms.source_system_id, "amount": ms.amount}
-                for ms in order.material_sources
-            ]
-        return result
+        return _order_to_dict(order)
     finally:
         game_db.close()
 
@@ -722,24 +714,7 @@ def get_orders(game_id: int, turn_id: int, db: Session = Depends(get_db),
             Order.turn_id == turn_id, Order.player_index == player_index
         ).all()
 
-        result = []
-        for o in orders:
-            entry = {
-                "order_id": o.order_id,
-                "turn_id": o.turn_id,
-                "player_index": o.player_index,
-                "order_type": o.order_type,
-                "source_system_id": o.source_system_id,
-                "target_system_id": o.target_system_id,
-                "quantity": o.quantity,
-            }
-            if o.order_type == "build_mine":
-                entry["material_sources"] = [
-                    {"system_id": ms.source_system_id, "amount": ms.amount}
-                    for ms in o.material_sources
-                ]
-            result.append(entry)
-        return result
+        return [_order_to_dict(o) for o in orders]
     finally:
         game_db.close()
 
@@ -755,12 +730,7 @@ def delete_order(game_id: int, turn_id: int, order_id: int,
 
     game_db = get_game_session(game_id)
     try:
-        pts = game_db.query(PlayerTurnStatus).filter(
-            PlayerTurnStatus.turn_id == turn_id,
-            PlayerTurnStatus.player_index == player_index,
-        ).first()
-        if pts and pts.submitted:
-            raise HTTPException(status_code=400, detail="Turn already submitted")
+        _check_turn_not_submitted(game_db, turn_id, player_index)
 
         order = game_db.query(Order).filter(
             Order.order_id == order_id, Order.turn_id == turn_id,
