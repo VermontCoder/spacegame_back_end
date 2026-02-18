@@ -180,29 +180,17 @@ def test_express_start_blocked_in_prod(client, auth_headers, monkeypatch):
     assert response.status_code == 403
 
 
-def test_generate_map(client, auth_headers):
-    # Create game first
-    game_resp = client.post("/games", json={
-        "name": "Map Test",
-        "num_players": 4,
+def test_get_map(client, auth_headers, monkeypatch):
+    import main
+    monkeypatch.setattr(main, "_is_dev_mode", lambda: True)
+    client.post("/auth/register", json={
+        "username": "test_user1", "first_name": "T1", "last_name": "U1",
+        "email": "tu1@example.com", "password": "p",
+    })
+    game_resp = client.post("/games/express-start", json={
+        "name": "Map Test", "num_players": 2,
     }, headers=auth_headers)
     game_id = game_resp.json()["game_id"]
-
-    # Generate map
-    response = client.post(f"/games/{game_id}/generate-map", json={"seed": 42}, headers=auth_headers)
-    assert response.status_code == 200
-    data = response.json()
-    assert data["status"] == "generated"
-
-
-def test_get_map(client, auth_headers):
-    # Create game and generate map
-    game_resp = client.post("/games", json={
-        "name": "Map Test",
-        "num_players": 4,
-    }, headers=auth_headers)
-    game_id = game_resp.json()["game_id"]
-    client.post(f"/games/{game_id}/generate-map", json={"seed": 42}, headers=auth_headers)
 
     # Get map (public — no auth needed)
     response = client.get(f"/games/{game_id}/map")

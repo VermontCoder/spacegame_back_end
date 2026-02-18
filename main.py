@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sqlalchemy import func, text
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from auth import create_access_token, get_current_user, hash_password, verify_password
@@ -111,43 +111,11 @@ def get_me(current_user: User = Depends(get_current_user)):
     }
 
 
-# --- Existing endpoints ---
-
-@app.get("/random")
-def get_random_number():
-    return {"number": random.randint(1, 100)}
-
-
-@app.get("/db-health")
-def db_health(db: Session = Depends(get_db)):
-    db.execute(text("SELECT 1"))
-    return {"status": "connected"}
-
-
-@app.get("/users")
-def get_users(db: Session = Depends(get_db)):
-    users = db.query(User).all()
-    return [
-        {
-            "user_id": u.user_id,
-            "username": u.username,
-            "first_name": u.first_name,
-            "last_name": u.last_name,
-            "email": u.email,
-        }
-        for u in users
-    ]
-
-
 # --- Game endpoints ---
 
 class CreateGameRequest(BaseModel):
     name: str
     num_players: int
-
-
-class GenerateMapRequest(BaseModel):
-    seed: int | None = None
 
 
 def _save_map_to_game_db(game_id: int, map_data: dict, num_players: int):
@@ -365,24 +333,6 @@ def express_start(req: CreateGameRequest, db: Session = Depends(get_db), current
     _generate_and_save_map(game, db)
 
     return {"game_id": game.game_id, "name": game.name, "status": game.status, "num_players": game.num_players}
-
-
-@app.post("/games/{game_id}/generate-map")
-def generate_game_map(game_id: int, req: GenerateMapRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    game = db.query(Game).filter(Game.game_id == game_id).first()
-    if not game:
-        raise HTTPException(status_code=404, detail="Game not found")
-
-    seed = req.seed if req.seed is not None else random.randint(0, 2**31)
-    map_data = generate_map(game.num_players, seed=seed)
-
-    game.seed = seed
-    game.status = "map_generated"
-    db.commit()
-
-    _save_map_to_game_db(game_id, map_data, game.num_players)
-
-    return {"status": "generated", "seed": seed, "num_systems": len(map_data["systems"])}
 
 
 @app.get("/games/{game_id}/map")
