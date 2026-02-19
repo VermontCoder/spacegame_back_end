@@ -10,7 +10,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from auth import create_access_token, get_current_user, hash_password, verify_password
-from database import Base, create_game_database, engine, get_db, get_game_session
+from database import Base, create_game_database, drop_game_database, engine, get_db, get_game_session
 from map_generator import generate_map
 from models import Game, GamePlayer, JumpLine, Order, OrderMaterialSource, PlayerTurnStatus, Ship, StarSystem, Structure, Turn, TurnSnapshot, CombatLog, User
 from turn_resolver import resolve_turn, _save_turn_snapshot
@@ -297,7 +297,7 @@ def express_start(req: CreateGameRequest, db: Session = Depends(get_db), current
         raise HTTPException(status_code=400, detail="num_players must be between 2 and 8")
 
     # Create game
-    game = Game(name=req.name, num_players=req.num_players, status="open", creator_id=current_user.user_id)
+    game = Game(name=req.name, num_players=req.num_players, status="open", creator_id=current_user.user_id, is_express=True)
     db.add(game)
     db.commit()
     db.refresh(game)
@@ -327,6 +327,30 @@ def express_start(req: CreateGameRequest, db: Session = Depends(get_db), current
     _generate_and_save_map(game, db)
 
     return {"game_id": game.game_id, "name": game.name, "status": game.status, "num_players": game.num_players}
+
+
+@app.delete("/games/{game_id}")
+def delete_game(game_id: int, db: Session = Depends(get_db),
+                current_user: User = Depends(get_current_user)):
+    if not _is_dev_mode():
+        raise HTTPException(status_code=403, detail="Game deletion is only available in dev mode")
+
+    game = db.query(Game).filter(Game.game_id == game_id).first()
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    if not game.is_express:
+        raise HTTPException(status_code=403, detail="Only express games can be deleted")
+
+    # Drop the per-game database
+    if game.db_name:
+        drop_game_database(game_id)
+
+    # Remove admin DB records
+    db.query(GamePlayer).filter(GamePlayer.game_id == game_id).delete()
+    db.delete(game)
+    db.commit()
+
+    return {"deleted": True, "game_id": game_id}
 
 
 @app.get("/games/{game_id}/map")
@@ -376,6 +400,7 @@ def get_game_map(game_id: int, db: Session = Depends(get_db)):
             "status": game.status,
             "current_turn": game.current_turn,
             "winner_player_index": game.winner_player_index,
+            "is_express": bool(game.is_express),
             "systems": [
                 {
                     "system_id": s.system_id,

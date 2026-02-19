@@ -66,3 +66,24 @@ def get_game_session(game_id: int):
     game_engine = _get_game_engine(game_id)
     GameSessionLocal = sessionmaker(bind=game_engine, autocommit=False, autoflush=False)
     return GameSessionLocal()
+
+
+def drop_game_database(game_id: int):
+    """Dispose the cached engine and drop the PostgreSQL database for a game."""
+    db_name = get_game_db_name(game_id)
+
+    # Dispose and remove the cached engine so connections are closed
+    if game_id in _game_engines:
+        _game_engines[game_id].dispose()
+        del _game_engines[game_id]
+
+    # Connect to the default 'postgres' database and drop the game DB
+    postgres_engine = create_engine(BASE_URL + "postgres", isolation_level="AUTOCOMMIT")
+    with postgres_engine.connect() as conn:
+        # Terminate any remaining connections to the game database before dropping
+        conn.execute(text(
+            f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+            f"WHERE datname = '{db_name}' AND pid <> pg_backend_pid()"
+        ))
+        conn.execute(text(f"DROP DATABASE IF EXISTS {db_name}"))
+    postgres_engine.dispose()

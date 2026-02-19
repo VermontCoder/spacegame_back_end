@@ -32,6 +32,7 @@ class Game(Base):
     created_at = Column(DateTime, server_default=func.now())
     current_turn = Column(Integer, nullable=True)
     winner_player_index = Column(Integer, nullable=True)
+    is_express = Column(Boolean, nullable=False, default=False)
 
     creator = relationship("User", backref="games")
     players = relationship("GamePlayer", back_populates="game")
