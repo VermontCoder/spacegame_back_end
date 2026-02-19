@@ -174,6 +174,7 @@ def main():
             status="active",
             creator_id=creator.user_id,
             current_turn=1,
+            is_express=True,
         )
         db.add(game)
         db.flush()
