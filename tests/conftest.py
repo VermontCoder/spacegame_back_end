@@ -78,6 +78,10 @@ def client(monkeypatch):
     monkeypatch.setattr(main, "create_game_database", mock_create_game_db)
     monkeypatch.setattr(main, "get_game_session", mock_get_game_session)
 
+    # Also patch get_game_session in turn_resolver (it imports directly)
+    import turn_resolver
+    monkeypatch.setattr(turn_resolver, "get_game_session", mock_get_game_session)
+
     yield TestClient(main.app)
     main.app.dependency_overrides.clear()
 

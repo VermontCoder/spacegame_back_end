@@ -144,3 +144,25 @@ class PlayerTurnStatus(GameBase):
     player_index = Column(Integer, nullable=False)
     submitted = Column(Boolean, nullable=False, default=False)
     submitted_at = Column(DateTime, nullable=True)
+
+
+class CombatLog(GameBase):
+    __tablename__ = "combat_logs"
+
+    log_id = Column(Integer, primary_key=True, autoincrement=True)
+    turn_id = Column(Integer, nullable=False, index=True)
+    system_id = Column(Integer, ForeignKey("star_systems.system_id"), nullable=False)
+    round_number = Column(Integer, nullable=False)
+    description = Column(Text, nullable=False)
+    combatants_json = Column(Text, nullable=False)
+
+
+class TurnSnapshot(GameBase):
+    __tablename__ = "turn_snapshots"
+
+    snapshot_id = Column(Integer, primary_key=True, autoincrement=True)
+    turn_id = Column(Integer, nullable=False, unique=True)
+    systems_json = Column(Text, nullable=False)
+    ships_json = Column(Text, nullable=False)
+    structures_json = Column(Text, nullable=False)
+    orders_json = Column(Text, nullable=False)

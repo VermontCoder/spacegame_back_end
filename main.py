@@ -1,8 +1,9 @@
+import json
 import os
 import random
 from datetime import datetime, timezone
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy import func
@@ -11,7 +12,8 @@ from sqlalchemy.orm import Session
 from auth import create_access_token, get_current_user, hash_password, verify_password
 from database import Base, create_game_database, engine, get_db, get_game_session
 from map_generator import generate_map
-from models import Game, GamePlayer, JumpLine, Order, OrderMaterialSource, PlayerTurnStatus, Ship, StarSystem, Structure, Turn, User
+from models import Game, GamePlayer, JumpLine, Order, OrderMaterialSource, PlayerTurnStatus, Ship, StarSystem, Structure, Turn, TurnSnapshot, CombatLog, User
+from turn_resolver import resolve_turn, _save_turn_snapshot
 
 app = FastAPI()
 
@@ -159,6 +161,10 @@ def _save_map_to_game_db(game_id: int, map_data: dict, num_players: int):
         for pi in range(1, num_players + 1):
             game_db.add(PlayerTurnStatus(turn_id=1, player_index=pi, submitted=False))
 
+        game_db.commit()
+
+        # Save turn-0 snapshot (initial state)
+        _save_turn_snapshot(game_db, 0, [])
         game_db.commit()
     finally:
         game_db.close()
@@ -369,6 +375,7 @@ def get_game_map(game_id: int, db: Session = Depends(get_db)):
             "seed": game.seed,
             "status": game.status,
             "current_turn": game.current_turn,
+            "winner_player_index": game.winner_player_index,
             "systems": [
                 {
                     "system_id": s.system_id,
@@ -770,6 +777,79 @@ def submit_turn(game_id: int, turn_id: int, db: Session = Depends(get_db),
         pts.submitted_at = datetime.now(timezone.utc)
         game_db.commit()
 
-        return {"player_index": player_index, "submitted": True}
+        # Check if all players have submitted — trigger resolution
+        all_statuses = game_db.query(PlayerTurnStatus).filter(
+            PlayerTurnStatus.turn_id == turn_id
+        ).all()
+        if all(s.submitted for s in all_statuses):
+            resolve_turn(game_id, turn_id, db)
+            return {"player_index": player_index, "submitted": True, "turn_resolved": True}
+        return {"player_index": player_index, "submitted": True, "turn_resolved": False}
     finally:
         game_db.close()
+
+
+@app.get("/games/{game_id}/turns")
+def list_turns(game_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    game = db.query(Game).filter(Game.game_id == game_id).first()
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    game_db = get_game_session(game_id)
+    try:
+        turns = game_db.query(Turn).order_by(Turn.turn_id).all()
+        return [
+            {
+                "turn_id": t.turn_id,
+                "status": t.status,
+                "resolved_at": t.resolved_at.isoformat() if t.resolved_at else None,
+            }
+            for t in turns
+        ]
+    finally:
+        game_db.close()
+
+
+@app.get("/games/{game_id}/turns/{turn_id}/snapshot")
+def get_snapshot(game_id: int, turn_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    game = db.query(Game).filter(Game.game_id == game_id).first()
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    game_db = get_game_session(game_id)
+    try:
+        snap = game_db.query(TurnSnapshot).filter(TurnSnapshot.turn_id == turn_id).first()
+        if not snap:
+            raise HTTPException(status_code=404, detail="Snapshot not found")
+        logs = game_db.query(CombatLog).filter(
+            CombatLog.turn_id == turn_id
+        ).order_by(CombatLog.system_id, CombatLog.round_number).all()
+        return {
+            "turn_id": snap.turn_id,
+            "systems": json.loads(snap.systems_json),
+            "ships": json.loads(snap.ships_json),
+            "structures": json.loads(snap.structures_json),
+            "orders": json.loads(snap.orders_json),
+            "combat_logs": [
+                {
+                    "system_id": l.system_id,
+                    "round_number": l.round_number,
+                    "description": l.description,
+                    "combatants": json.loads(l.combatants_json),
+                }
+                for l in logs
+            ],
+        }
+    finally:
+        game_db.close()
+
+
+@app.post("/games/{game_id}/force-resolve")
+def force_resolve(game_id: int, request: Request, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    host = request.client.host if request.client else ""
+    if host not in ("127.0.0.1", "::1", "localhost", "testclient") and not _is_dev_mode():
+        raise HTTPException(status_code=403, detail="Dev only")
+    game = db.query(Game).filter(Game.game_id == game_id).first()
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    turn_id = game.current_turn
+    resolve_turn(game_id, turn_id, db)
+    return {"status": "resolved", "turn_id": turn_id}
