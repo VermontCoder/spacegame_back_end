@@ -129,6 +129,85 @@ def test_safe_path_to_founders_world():
                 )
 
 
+def test_neutral_clusters_have_at_least_one_system():
+    """Every neutral cluster must contain at least one star system."""
+    for num_players in [2, 3, 4, 5, 6]:
+        for seed in [1, 42, 99]:
+            result = generate_map(num_players, seed=seed)
+            neutral_clusters = [c for c in result["clusters"] if not c["is_home_cluster"]]
+            for nc in neutral_clusters:
+                assert len(nc["system_ids"]) >= 1, (
+                    f"Neutral cluster {nc['id']} has no systems "
+                    f"(players={num_players}, seed={seed})"
+                )
+
+
+def test_player_clusters_form_ring():
+    """For 3+ players, each player cluster must have direct jump lines to
+    at least 2 other player clusters (ring topology)."""
+    for num_players in [3, 4, 5, 6]:
+        for seed in [1, 42, 99]:
+            result = generate_map(num_players, seed=seed)
+            G = nx.Graph()
+            for jl in result["jump_lines"]:
+                G.add_edge(jl["from_id"], jl["to_id"])
+
+            sys_to_cluster = {0: None}
+            for c in result["clusters"]:
+                for sid in c["system_ids"]:
+                    sys_to_cluster[sid] = c["id"]
+
+            player_cluster_ids = {c["id"] for c in result["clusters"] if c["is_home_cluster"]}
+            player_clusters = [c for c in result["clusters"] if c["is_home_cluster"]]
+
+            for cluster in player_clusters:
+                cluster_sys = set(cluster["system_ids"])
+                connected_player_clusters = set()
+                for sid in cluster_sys:
+                    for neighbor in G.neighbors(sid):
+                        nc = sys_to_cluster.get(neighbor)
+                        if nc in player_cluster_ids and nc != cluster["id"]:
+                            connected_player_clusters.add(nc)
+                assert len(connected_player_clusters) >= 2, (
+                    f"Player cluster {cluster['id']} (player {cluster['player_index']}) "
+                    f"connects to only {len(connected_player_clusters)} other player cluster(s) "
+                    f"(players={num_players}, seed={seed})"
+                )
+
+
+def test_neutral_clusters_bridge_player_clusters():
+    """Every neutral cluster must connect directly to at least 2 different
+    player clusters (acting as a contested bridge between them)."""
+    for num_players in [2, 3, 4, 5, 6]:
+        for seed in [1, 42, 99]:
+            result = generate_map(num_players, seed=seed)
+            G = nx.Graph()
+            for jl in result["jump_lines"]:
+                G.add_edge(jl["from_id"], jl["to_id"])
+
+            sys_to_cluster = {0: None}
+            for c in result["clusters"]:
+                for sid in c["system_ids"]:
+                    sys_to_cluster[sid] = c["id"]
+
+            player_cluster_ids = {c["id"] for c in result["clusters"] if c["is_home_cluster"]}
+            neutral_clusters = [c for c in result["clusters"] if not c["is_home_cluster"]]
+
+            for neutral in neutral_clusters:
+                neutral_sys = set(neutral["system_ids"])
+                connected_player_clusters = set()
+                for sid in neutral_sys:
+                    for neighbor in G.neighbors(sid):
+                        nc = sys_to_cluster.get(neighbor)
+                        if nc in player_cluster_ids:
+                            connected_player_clusters.add(nc)
+                assert len(connected_player_clusters) >= 2, (
+                    f"Neutral cluster {neutral['id']} connects to only "
+                    f"{len(connected_player_clusters)} player cluster(s) "
+                    f"(players={num_players}, seed={seed})"
+                )
+
+
 def test_deterministic_with_seed():
     """Same seed should produce identical maps."""
     result1 = generate_map(4, seed=123)

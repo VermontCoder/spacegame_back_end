@@ -56,16 +56,23 @@ def _distribute_systems(
     """Assign system IDs to clusters. System 0 is Founder's World (no cluster).
     Mutates clusters in place, adding IDs to system_ids lists."""
     player_clusters = [c for c in clusters if c["is_home_cluster"]]
+    neutral_clusters = [c for c in clusters if not c["is_home_cluster"]]
     min_per_player = 3
+    min_per_neutral = 1
 
     next_id = 1  # 0 is Founder's World
     for cluster in player_clusters:
         for _ in range(min_per_player):
             cluster["system_ids"].append(next_id)
             next_id += 1
+    for cluster in neutral_clusters:
+        for _ in range(min_per_neutral):
+            cluster["system_ids"].append(next_id)
+            next_id += 1
 
-    remaining = num_systems - 1 - (min_per_player * len(player_clusters))
-    for _ in range(remaining):
+    reserved = 1 + (min_per_player * len(player_clusters)) + (min_per_neutral * len(neutral_clusters))
+    remaining = num_systems - reserved
+    for _ in range(max(0, remaining)):
         cluster = rng.choice(clusters)
         cluster["system_ids"].append(next_id)
         next_id += 1
@@ -87,7 +94,7 @@ def _build_graph(clusters: list[dict], rng: random.Random) -> nx.Graph:
             continue
         rng.shuffle(ids)
         for i in range(1, len(ids)):
-            G.add_edge(ids[i - 1], ids[i], weight=3.0)
+            G.add_edge(ids[i - 1], ids[i], weight=1.0)
         # Add 1-2 extra intra-cluster edges where degree allows
         max_extra = min(2, len(ids) * (len(ids) - 1) // 2 - (len(ids) - 1))
         for _ in range(max(0, max_extra)):
@@ -99,20 +106,38 @@ def _build_graph(clusters: list[dict], rng: random.Random) -> nx.Graph:
             if not candidates:
                 break
             a, b = rng.choice(candidates)
-            G.add_edge(a, b, weight=3.0)
+            G.add_edge(a, b, weight=1.0)
 
-    # Inter-cluster edges (ensure all clusters are connected)
-    cluster_order = list(range(len(clusters)))
-    rng.shuffle(cluster_order)
-    for i in range(1, len(cluster_order)):
-        c1 = clusters[cluster_order[i - 1]]
-        c2 = clusters[cluster_order[i]]
+    # Inter-cluster edges: player clusters form a ring, neutral clusters bridge adjacent pairs
+    player_cluster_list = [c for c in clusters if c["is_home_cluster"]]
+    neutral_cluster_list = [c for c in clusters if not c["is_home_cluster"]]
+    rng.shuffle(player_cluster_list)
+    n_players = len(player_cluster_list)
+
+    # Connect player clusters in a ring
+    for i in range(n_players):
+        c1 = player_cluster_list[i]
+        c2 = player_cluster_list[(i + 1) % n_players]
         candidates_1 = [s for s in c1["system_ids"] if G.degree(s) < 4]
         candidates_2 = [s for s in c2["system_ids"] if G.degree(s) < 4]
         if candidates_1 and candidates_2:
             a = rng.choice(candidates_1)
             b = rng.choice(candidates_2)
-            G.add_edge(a, b, weight=0.5)
+            G.add_edge(a, b, weight=1.0)
+
+    # Assign each neutral cluster to bridge two adjacent player clusters in the ring
+    for i, neutral in enumerate(neutral_cluster_list):
+        pc1 = player_cluster_list[i % n_players]
+        pc2 = player_cluster_list[(i + 1) % n_players]
+        neutral["bridge_pair"] = (pc1["id"], pc2["id"])
+        for pc in [pc1, pc2]:
+            nc_candidates = [s for s in neutral["system_ids"] if G.degree(s) < 4]
+            pc_candidates = [s for s in pc["system_ids"] if G.degree(s) < 4]
+            if nc_candidates and pc_candidates:
+                a = rng.choice(nc_candidates)
+                b = rng.choice(pc_candidates)
+                if not G.has_edge(a, b):
+                    G.add_edge(a, b, weight=1.0)
 
     # Connect Founder's World to one system per cluster (up to degree 4)
     for cluster in clusters:
@@ -121,13 +146,13 @@ def _build_graph(clusters: list[dict], rng: random.Random) -> nx.Graph:
         candidates = [s for s in cluster["system_ids"] if G.degree(s) < 4]
         if candidates:
             target = rng.choice(candidates)
-            G.add_edge(0, target, weight=0.5)
+            G.add_edge(0, target, weight=1.0)
 
     # If Founder's World has no connections yet, force at least one
     if G.degree(0) == 0:
         all_systems = [n for n in G.nodes if n != 0 and G.degree(n) < 4]
         if all_systems:
-            G.add_edge(0, rng.choice(all_systems), weight=0.5)
+            G.add_edge(0, rng.choice(all_systems), weight=1.0)
 
     # Ensure global connectivity — add bridges if needed
     components = list(nx.connected_components(G))
@@ -139,12 +164,12 @@ def _build_graph(clusters: list[dict], rng: random.Random) -> nx.Graph:
         if candidates_a and candidates_b:
             a = rng.choice(candidates_a)
             b = rng.choice(candidates_b)
-            G.add_edge(a, b, weight=0.5)
+            G.add_edge(a, b, weight=1.0)
         else:
             # Fallback: allow degree 5 temporarily to ensure connectivity
             a = rng.choice(list(comp_a))
             b = rng.choice(list(comp_b))
-            G.add_edge(a, b, weight=0.5)
+            G.add_edge(a, b, weight=1.0)
         components = list(nx.connected_components(G))
 
     return G
@@ -193,13 +218,13 @@ def _ensure_safe_paths(
         ]
         if candidates:
             a, b = min(candidates, key=lambda pair: (G.degree(pair[0]) + G.degree(pair[1])))
-            G.add_edge(a, b, weight=0.5)
+            G.add_edge(a, b, weight=1.0)
         else:
             # Fallback: allow exceeding degree constraint to guarantee safe path
             for a in player_reachable:
                 for b in fw_reachable:
                     if not G.has_edge(a, b):
-                        G.add_edge(a, b, weight=0.5)
+                        G.add_edge(a, b, weight=1.0)
                         break
                 else:
                     continue
@@ -217,14 +242,21 @@ def _compute_layout(
     cluster_centers = {}
     for i, cluster in enumerate(player_clusters):
         angle = 2 * math.pi * i / len(player_clusters)
-        cx = 0.5 + 0.35 * math.cos(angle)
-        cy = 0.5 + 0.35 * math.sin(angle)
+        cx = 0.5 + 0.2 * math.cos(angle)
+        cy = 0.5 + 0.2 * math.sin(angle)
         cluster_centers[cluster["id"]] = (cx, cy)
 
     for i, cluster in enumerate(neutral_clusters):
-        angle = 2 * math.pi * i / max(1, len(neutral_clusters)) + math.pi / 6
-        cx = 0.5 + 0.15 * math.cos(angle)
-        cy = 0.5 + 0.15 * math.sin(angle)
+        if "bridge_pair" in cluster:
+            pc1_id, pc2_id = cluster["bridge_pair"]
+            cx1, cy1 = cluster_centers[pc1_id]
+            cx2, cy2 = cluster_centers[pc2_id]
+            cx = (cx1 + cx2) / 2
+            cy = (cy1 + cy2) / 2
+        else:
+            angle = 2 * math.pi * i / max(1, len(neutral_clusters)) + math.pi / 6
+            cx = 0.5 + 0.15 * math.cos(angle)
+            cy = 0.5 + 0.15 * math.sin(angle)
         cluster_centers[cluster["id"]] = (cx, cy)
 
     # Initial positions: systems near their cluster center + jitter
@@ -241,14 +273,13 @@ def _compute_layout(
         G,
         pos=initial_pos,
         fixed=[0],
-        weight="weight",
         iterations=150,
         seed=rng.randint(0, 2**31),
-        k=0.9 / math.sqrt(G.number_of_nodes()),
+        k=0.5 / math.sqrt(G.number_of_nodes()),
     )
 
-    # Scale to 0-1000 x 0-800 with padding
-    padding = 50
+    # Scale to 0-1600 x 0-1200 with padding
+    padding = 80
     xs = [p[0] for p in pos.values()]
     ys = [p[1] for p in pos.values()]
     min_x, max_x = min(xs), max(xs)
@@ -258,8 +289,8 @@ def _compute_layout(
 
     scaled = {}
     for node_id, (x, y) in pos.items():
-        sx = padding + (x - min_x) / range_x * (1000 - 2 * padding)
-        sy = padding + (y - min_y) / range_y * (800 - 2 * padding)
+        sx = padding + (x - min_x) / range_x * (1600 - 2 * padding)
+        sy = padding + (y - min_y) / range_y * (1200 - 2 * padding)
         scaled[node_id] = (round(float(sx), 2), round(float(sy), 2))
 
     return scaled
