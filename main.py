@@ -3,7 +3,7 @@ import os
 import random
 from datetime import datetime, timezone
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy import func
@@ -283,16 +283,9 @@ def join_game(game_id: int, db: Session = Depends(get_db), current_user: User = 
     return {"game_id": game_id, "player_index": next_index, "status": game.status}
 
 
-def _is_dev_mode() -> bool:
-    """Check if we're running in dev mode based on the database URL."""
-    base_url = os.environ.get("postgresDB", "")
-    return "localhost" in base_url or "127.0.0.1" in base_url
-
 
 @app.post("/games/express-start")
 def express_start(req: CreateGameRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    if not _is_dev_mode():
-        raise HTTPException(status_code=403, detail="Express start is only available in dev mode")
     if req.num_players < 2 or req.num_players > 8:
         raise HTTPException(status_code=400, detail="num_players must be between 2 and 8")
 
@@ -332,9 +325,6 @@ def express_start(req: CreateGameRequest, db: Session = Depends(get_db), current
 @app.delete("/games/{game_id}")
 def delete_game(game_id: int, db: Session = Depends(get_db),
                 current_user: User = Depends(get_current_user)):
-    if not _is_dev_mode():
-        raise HTTPException(status_code=403, detail="Game deletion is only available in dev mode")
-
     game = db.query(Game).filter(Game.game_id == game_id).first()
     if not game:
         raise HTTPException(status_code=404, detail="Game not found")
@@ -868,10 +858,7 @@ def get_snapshot(game_id: int, turn_id: int, current_user: User = Depends(get_cu
 
 
 @app.post("/games/{game_id}/force-resolve")
-def force_resolve(game_id: int, request: Request, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    host = request.client.host if request.client else ""
-    if host not in ("127.0.0.1", "::1", "localhost", "testclient") and not _is_dev_mode():
-        raise HTTPException(status_code=403, detail="Dev only")
+def force_resolve(game_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     game = db.query(Game).filter(Game.game_id == game_id).first()
     if not game:
         raise HTTPException(status_code=404, detail="Game not found")
